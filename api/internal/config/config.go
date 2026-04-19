@@ -47,6 +47,8 @@ type PubSubConfig struct {
 	TopicOverride        string `mapstructure:"topic_override"`
 	SubscriptionOverride string `mapstructure:"subscription_override"`
 	CredentialsFile      string `mapstructure:"credentials_file"`
+	EventsTopic          string `mapstructure:"events_topic"`
+	EventsSubscription   string `mapstructure:"events_subscription"`
 }
 
 type JWTConfig struct {
@@ -215,6 +217,8 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("pubsub.mode", "mock")
 	v.SetDefault("pubsub.project_id", "local-project")
+	v.SetDefault("pubsub.events_topic", "notifications-ingress")
+	v.SetDefault("pubsub.events_subscription", "notif-service-ingress")
 
 	v.SetDefault("cadence.mode", "temporal")
 	v.SetDefault("cadence.host_port", "localhost:7233")

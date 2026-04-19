@@ -107,6 +107,19 @@ func main() {
 
 	// Services needed for activities
 	templateSvc := service.NewTemplateService(templateRepo, redisClient)
+	prefsSvc := service.NewPreferencesService(redisClient)
+	notifSvc := service.NewNotificationService(
+		notifRepo,
+		nil, // schedRepo not needed for basic ingress
+		eventRepo,
+		attemptRepo,
+		templateSvc,
+		prefsSvc,
+		temporalCli,
+		nil, // publisher - service will use fallback if nil, or we can inject one
+		cfg,
+		log,
+	)
 	
 	// Pub/Sub publisher for PublishToPubSubActivity
 	var publisher pubsub.Publisher
@@ -146,6 +159,7 @@ func main() {
 			notifRepo, attemptRepo, eventRepo, cbRegistry, log),
 		worker.NewWebhookWorker(subscriber, webhookDispatcher,
 			notifRepo, attemptRepo, eventRepo, cbRegistry, log),
+		worker.NewEventWorker(subscriber, notifSvc, cfg.PubSub, log),
 	}
 
 	// Metrics & Health server

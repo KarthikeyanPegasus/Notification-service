@@ -95,6 +95,34 @@ func (s *RedisSubscriber) Subscribe(ctx context.Context, subscription string, ha
 	}
 }
 
+func (s *RedisSubscriber) SubscribeRaw(ctx context.Context, subscription string, handler RawMessageHandler) error {
+	topic := TopicID[subscription]
+	if topic == "" {
+		topic = subscription
+	}
+
+	pubsub := s.client.Subscribe(ctx, topic)
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+	s.log.Info("redis raw subscriber listening", zap.String("topic", topic))
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case msg, ok := <-ch:
+			if !ok {
+				return nil
+			}
+
+			if err := handler(ctx, []byte(msg.Payload)); err != nil {
+				s.log.Error("handler error in redis raw subscriber", zap.Error(err))
+			}
+		}
+	}
+}
+
 func (s *RedisSubscriber) Close() error {
 	return nil // connection managed externally
 }

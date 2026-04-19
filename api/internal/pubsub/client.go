@@ -20,6 +20,7 @@ var TopicID = map[string]string{
 	"webhook":   "notifications-webhook",
 	"dlq":       "notifications-dlq",
 	"config":    "internal-config-reload",
+	"ingress":   "notifications-ingress",
 }
 
 // Message is the envelope published to a Pub/Sub topic.
@@ -44,8 +45,11 @@ type Publisher interface {
 // Subscriber receives messages from a Pub/Sub subscription.
 type Subscriber interface {
 	Subscribe(ctx context.Context, subscription string, handler MessageHandler) error
+	SubscribeRaw(ctx context.Context, subscription string, handler RawMessageHandler) error
 	Close() error
 }
+
+type RawMessageHandler func(ctx context.Context, data []byte) error
 
 // MessageHandler processes an incoming Pub/Sub message.
 // Returning nil acks the message; returning an error nacks it.
@@ -144,6 +148,21 @@ func (s *GCPSubscriber) Subscribe(ctx context.Context, subscription string, hand
 			return
 		}
 		if err := handler(ctx, &msg); err != nil {
+			m.Nack()
+			return
+		}
+		m.Ack()
+	})
+}
+
+func (s *GCPSubscriber) SubscribeRaw(ctx context.Context, subscription string, handler RawMessageHandler) error {
+	subID := s.subscriptionOverride
+	if subID == "" {
+		subID = subscription
+	}
+	sub := s.client.Subscription(subID)
+	return sub.Receive(ctx, func(ctx context.Context, m *gcppubsub.Message) {
+		if err := handler(ctx, m.Data); err != nil {
 			m.Nack()
 			return
 		}

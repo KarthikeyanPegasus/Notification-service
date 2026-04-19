@@ -95,4 +95,31 @@ func (s *MockSubscriber) Subscribe(ctx context.Context, channel string, handler 
 	}
 }
 
+func (s *MockSubscriber) SubscribeRaw(ctx context.Context, channel string, handler RawMessageHandler) error {
+	ch := s.publisher.Chan(channel)
+	if ch == nil {
+		return fmt.Errorf("mock subscriber: unknown channel %s", channel)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case msg, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			data, _ := json.Marshal(msg)
+			if err := handler(ctx, data); err != nil {
+				if s.log != nil {
+					s.log.Warn("mock subscriber raw: handler error",
+						zap.String("channel", channel),
+						zap.Error(err),
+					)
+				}
+			}
+		}
+	}
+}
+
 func (s *MockSubscriber) Close() error { return nil }
