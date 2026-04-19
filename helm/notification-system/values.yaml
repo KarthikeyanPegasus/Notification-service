@@ -1,0 +1,154 @@
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+# ── API server ────────────────────────────────────────────────────────────────
+api:
+  enabled: true
+  image:
+    repository: notification-service-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  service:
+    type: ClusterIP
+    port: 8080
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  env:
+    NS_SERVER_MODE: "release"
+    NS_LOG_FORMAT: "json"
+    NS_LOG_LEVEL: "info"
+    NS_PUBSUB_MODE: "gcp"
+  podAnnotations: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+
+# ── Worker ────────────────────────────────────────────────────────────────────
+worker:
+  enabled: true
+  image:
+    repository: notification-service-worker
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  env:
+    NS_LOG_FORMAT: "json"
+    NS_LOG_LEVEL: "info"
+    NS_PUBSUB_MODE: "gcp"
+  podAnnotations: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+
+# ── UI ────────────────────────────────────────────────────────────────────────
+ui:
+  enabled: true
+  image:
+    repository: notification-service-ui
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  service:
+    type: ClusterIP
+    port: 3000
+  env:
+    NEXT_PUBLIC_API_URL: "https://api.notifications.example.com"
+  podAnnotations: {}
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: notifications.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: ui
+        - path: /v1
+          pathType: Prefix
+          service: api
+        - path: /health
+          pathType: Prefix
+          service: api
+        - path: /webhooks
+          pathType: Prefix
+          service: api
+  tls:
+    - secretName: notifications-tls
+      hosts:
+        - notifications.example.com
+
+# ── Secrets (override with --set or sealed secrets) ───────────────────────────
+secrets:
+  databaseDsn: "postgres://notif:changeme@postgres:5432/notifdb?sslmode=require"
+  redisAddr: "redis:6379"
+  jwtSecret: "change-me-in-production"
+  serviceSecret: "internal-service-token"
+  gcpProjectId: ""
+  awsAccessKeyId: ""
+  awsSecretAccessKey: ""
+  twilioAccountSid: ""
+  twilioAuthToken: ""
+  fcmServiceAccountJson: ""
+
+# ── ConfigMap ─────────────────────────────────────────────────────────────────
+config:
+  pubsubMode: "gcp"
+  serverPort: "8080"
+  migrationDir: "migrations"
+  webhookSigningSecret: "webhook-signing-secret"
+
+# ── PostgreSQL (sub-chart, disable when using external) ───────────────────────
+postgresql:
+  enabled: false  # set to true for self-hosted; prefer managed CloudSQL/RDS in prod
+  auth:
+    username: notif
+    password: notif
+    database: notifdb
+
+# ── Redis (sub-chart, disable when using external) ────────────────────────────
+redis:
+  enabled: false  # set to true for self-hosted; prefer managed ElastiCache/Memorystore
+  auth:
+    enabled: false

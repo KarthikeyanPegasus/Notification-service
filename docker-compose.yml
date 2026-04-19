@@ -1,0 +1,189 @@
+version: "3.9"
+
+x-go-common: &go-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  environment:
+    NS_DATABASE_DSN: "postgres://notif:notif@postgres:5432/notifdb?sslmode=disable"
+    NS_REDIS_ADDR: "redis:6379"
+    NS_PUBSUB_MODE: "mock"
+    NS_LOG_FORMAT: "console"
+    NS_LOG_LEVEL: "debug"
+    NS_SERVER_MODE: "debug"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  volumes:
+    - ./api/config:/config:ro
+    - ./api/migrations:/migrations:ro
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: notif
+      POSTGRES_PASSWORD: notif
+      POSTGRES_DB: notifdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notif -d notifdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    restart: unless-stopped
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    restart: unless-stopped
+    ports:
+      - "7233:7233"
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - SQL_ADDR=postgres
+      - POSTGRES_USER=notif
+      - POSTGRES_PWD=notif
+      - POSTGRES_SEEDS=postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    restart: unless-stopped
+    ports:
+      - "8082:8080"
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    depends_on:
+      - temporal
+
+  # ── Application ─────────────────────────────────────────────────────────────
+  api:
+    <<: *go-common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: api
+    ports:
+      - "8080:8080"
+    environment:
+      NS_DATABASE_DSN: "postgres://notif:notif@postgres:5432/notifdb?sslmode=disable"
+      NS_REDIS_ADDR: "redis:6379"
+      NS_PUBSUB_MODE: "gcp"
+      NS_PUBSUB_PROJECT_ID: "learnera-277606"
+      NS_PUBSUB_TOPIC_OVERRIDE: "testing"
+      NS_PUBSUB_SUBSCRIPTION_OVERRIDE: "testing-sub"
+      NS_PUBSUB_CREDENTIALS_FILE: "/config/pub-sub-key.json"
+      GOOGLE_APPLICATION_CREDENTIALS: "/config/pub-sub-key.json"
+      NS_LOG_FORMAT: "console"
+      NS_LOG_LEVEL: "debug"
+      NS_SERVER_MODE: "debug"
+      NS_PROVIDERS_EMAIL_SMTP_HOST: "mailhog"
+      NS_PROVIDERS_EMAIL_SMTP_PORT: "1025"
+      NS_JWT_SECRET: "change-me-in-production"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    <<: *go-common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: worker
+    ports:
+      - "8081:8081"
+    environment:
+      NS_DATABASE_DSN: "postgres://notif:notif@postgres:5432/notifdb?sslmode=disable"
+      NS_REDIS_ADDR: "redis:6379"
+      NS_PUBSUB_MODE: "gcp"
+      NS_PUBSUB_PROJECT_ID: "learnera-277606"
+      NS_PUBSUB_TOPIC_OVERRIDE: "testing"
+      NS_PUBSUB_SUBSCRIPTION_OVERRIDE: "testing-sub"
+      NS_PUBSUB_CREDENTIALS_FILE: "/config/pub-sub-key.json"
+      GOOGLE_APPLICATION_CREDENTIALS: "/config/pub-sub-key.json"
+      NS_LOG_FORMAT: "console"
+      NS_LOG_LEVEL: "debug"
+      NS_PROVIDERS_EMAIL_SMTP_HOST: "mailhog"
+      NS_PROVIDERS_EMAIL_SMTP_PORT: "1025"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:8080"
+    depends_on:
+      - api
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    volumes:
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/provisioning/dashboards/notifications.json:/etc/grafana/provisioning/dashboards/notifications.json
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:

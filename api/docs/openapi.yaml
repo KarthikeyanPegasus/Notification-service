@@ -1,0 +1,264 @@
+openapi: 3.0.3
+info:
+  title: Notification Service API
+  description: |
+    Comprehensive Notification-as-a-Service API for high-frequency multicahannel delivery.
+    Supports Email, SMS, Push, Webhooks, and WebSockets.
+  version: 1.0.0
+  contact:
+    name: Spidey Deepmind Team
+    url: https://github.com/spidey/notification-service
+
+servers:
+  - url: http://localhost:8080/v1
+    description: Local Development Server
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    ServiceAuth:
+      type: apiKey
+      in: header
+      name: X-Service-Token
+
+  schemas:
+    Channel:
+      type: string
+      enum: [email, sms, push, websocket, webhook]
+    
+    Priority:
+      type: string
+      enum: [high, medium, low]
+    
+    NotificationStatus:
+      type: string
+      enum: [pending, queued, sent, delivered, failed, cancelled, bounced]
+
+    Notification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        user_id: { type: string, format: uuid }
+        channel: { $ref: '#/components/schemas/Channel' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        type: { type: string }
+        template_id: { type: string, format: uuid, nullable: true }
+        rendered_content:
+          type: object
+          properties:
+            subject: { type: string }
+            body: { type: string }
+            data: { type: object, additionalProperties: { type: string } }
+        recipient: { type: string }
+        status: { $ref: '#/components/schemas/NotificationStatus' }
+        scheduled_at: { type: string, format: date-time, nullable: true }
+        sent_at: { type: string, format: date-time, nullable: true }
+        delivered_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SendRequest:
+      type: object
+      required: [idempotency_key, user_id, channels, type, recipient]
+      properties:
+        idempotency_key: { type: string, maxLength: 128 }
+        user_id: { type: string, format: uuid }
+        channels:
+          type: array
+          items: { $ref: '#/components/schemas/Channel' }
+        type: { type: string, maxLength: 50 }
+        template_id: { type: string, format: uuid }
+        template_variables:
+          type: object
+          additionalProperties: { type: string }
+        recipient: { type: string, maxLength: 512 }
+        scheduled_at: { type: string, format: date-time }
+
+    OTPSendRequest:
+      type: object
+      required: [user_id, phone_number, purpose]
+      properties:
+        user_id: { type: string, format: uuid }
+        phone_number: { type: string }
+        purpose: { type: string }
+        expiry_seconds: { type: integer, default: 300 }
+
+    OTPVerifyRequest:
+      type: object
+      required: [user_id, purpose, otp]
+      properties:
+        user_id: { type: string, format: uuid }
+        purpose: { type: string }
+        otp: { type: string }
+
+    Error:
+      type: object
+      properties:
+        code: { type: string }
+        message: { type: string }
+        request_id: { type: string, format: uuid }
+
+security:
+  - BearerAuth: []
+
+paths:
+  /notifications:
+    post:
+      summary: Send a notification
+      tags: [Notifications]
+      requestBody:
+        required: true
+        content:
+          application_json:
+            schema: { $ref: '#/components/schemas/SendRequest' }
+      responses:
+        '202':
+          description: Notification accepted
+          content:
+            application_json:
+              schema:
+                type: object
+                properties:
+                  notification_id: { type: string, format: uuid }
+                  status: { type: string }
+        '400':
+          description: Validation error
+          content:
+            application_json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+    get:
+      summary: List notifications
+      tags: [Notifications]
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 50 }
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: channel
+          in: query
+          schema: { $ref: '#/components/schemas/Channel' }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/NotificationStatus' }
+      responses:
+        '200':
+          description: Success
+          content:
+            application_json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Notification' }
+                  total: { type: integer }
+                  page: { type: integer }
+                  page_size: { type: integer }
+
+  /notifications/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Get notification details
+      tags: [Notifications]
+      responses:
+        '200':
+          description: Success
+          content:
+            application_json:
+              schema:
+                type: object
+                properties:
+                  notification: { $ref: '#/components/schemas/Notification' }
+                  attempts: { type: array, items: { type: object } }
+                  events: { type: array, items: { type: object } }
+
+  /otp/send:
+    post:
+      summary: Generate and send OTP
+      tags: [OTP]
+      security:
+        - ServiceAuth: []
+      requestBody:
+        required: true
+        content:
+          application_json:
+            schema: { $ref: '#/components/schemas/OTPSendRequest' }
+      responses:
+        '200':
+          description: OTP Sent
+          content:
+            application_json:
+              schema:
+                type: object
+                properties:
+                  otp_id: { type: string, format: uuid }
+                  expiry_at: { type: string, format: date-time }
+
+  /otp/verify:
+    post:
+      summary: Verify an OTP
+      tags: [OTP]
+      security:
+        - ServiceAuth: []
+      requestBody:
+        required: true
+        content:
+          application_json:
+            schema: { $ref: '#/components/schemas/OTPVerifyRequest' }
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application_json:
+              schema:
+                type: object
+                properties:
+                  verified: { type: boolean }
+
+  /reports/summary:
+    get:
+      summary: Get delivery summary report
+      tags: [Reports]
+      responses:
+        '200':
+          description: Success
+          content:
+            application_json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    channel: { $ref: '#/components/schemas/Channel' }
+                    total: { type: integer }
+                    success_rate: { type: number, format: float }
+                    p50_latency_ms: { type: number, format: float }
+                    p95_latency_ms: { type: number, format: float }
+
+  /governance/suppressions:
+    get:
+      summary: List active suppressions
+      tags: [Governance]
+      responses:
+        '200':
+          description: Success
+    post:
+      summary: Add to suppression list
+      tags: [Governance]
+      responses:
+        '201':
+          description: Created

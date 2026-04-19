@@ -1,0 +1,175 @@
+import type { Notification, ReportSummary, Attempt, Event } from '@/types'
+
+const now = new Date()
+const hoursAgo = (h: number) => new Date(now.getTime() - h * 3600000).toISOString()
+const minsAgo = (m: number) => new Date(now.getTime() - m * 60000).toISOString()
+
+export const mockAttempts: Attempt[] = [
+  {
+    id: 'att-001',
+    notification_id: 'notif-001',
+    provider: 'sendgrid',
+    status: 'DELIVERED',
+    provider_message_id: 'sg-msg-abc123',
+    latency_ms: 234,
+    created_at: minsAgo(5),
+  },
+  {
+    id: 'att-002',
+    notification_id: 'notif-002',
+    provider: 'twilio',
+    status: 'FAILED',
+    error: 'Invalid phone number format',
+    latency_ms: 88,
+    created_at: minsAgo(30),
+  },
+]
+
+export const mockEvents: Event[] = [
+  { id: 'evt-001', notification_id: 'notif-001', event_type: 'QUEUED', created_at: minsAgo(10) },
+  { id: 'evt-002', notification_id: 'notif-001', event_type: 'SENT', created_at: minsAgo(8) },
+  { id: 'evt-003', notification_id: 'notif-001', event_type: 'DELIVERED', created_at: minsAgo(5) },
+]
+
+export const mockNotifications: Notification[] = [
+  {
+    id: 'notif-001',
+    user_id: 'user-abc',
+    channel: 'email',
+    status: 'DELIVERED',
+    priority: 'normal',
+    subject: 'Welcome to the platform',
+    body: 'Hi there! Welcome aboard.',
+    provider: 'sendgrid',
+    idempotency_key: 'idem-001',
+    sent_at: minsAgo(5),
+    created_at: minsAgo(10),
+    updated_at: minsAgo(5),
+    attempts: [mockAttempts[0]],
+    events: mockEvents,
+  },
+  {
+    id: 'notif-002',
+    user_id: 'user-def',
+    channel: 'sms',
+    status: 'FAILED',
+    priority: 'high',
+    body: 'Your OTP is 123456',
+    provider: 'twilio',
+    created_at: minsAgo(30),
+    updated_at: minsAgo(28),
+    attempts: [mockAttempts[1]],
+    events: [
+      { id: 'evt-004', notification_id: 'notif-002', event_type: 'QUEUED', created_at: minsAgo(32) },
+      { id: 'evt-005', notification_id: 'notif-002', event_type: 'FAILED', created_at: minsAgo(30) },
+    ],
+  },
+  {
+    id: 'notif-003',
+    user_id: 'user-ghi',
+    channel: 'push',
+    status: 'SENT',
+    priority: 'normal',
+    body: 'You have a new message',
+    provider: 'firebase',
+    created_at: hoursAgo(1),
+    updated_at: hoursAgo(1),
+  },
+  {
+    id: 'notif-004',
+    user_id: 'user-jkl',
+    channel: 'email',
+    status: 'PENDING',
+    priority: 'low',
+    subject: 'Monthly Newsletter',
+    body: 'Check out what happened this month.',
+    scheduled_at: new Date(now.getTime() + 3600000).toISOString(),
+    created_at: hoursAgo(2),
+    updated_at: hoursAgo(2),
+  },
+  {
+    id: 'notif-005',
+    user_id: 'user-mno',
+    channel: 'webhook',
+    status: 'DELIVERED',
+    priority: 'critical',
+    body: '{"event":"order.placed","order_id":"ord-999"}',
+    provider: 'custom-webhook',
+    created_at: hoursAgo(3),
+    updated_at: hoursAgo(3),
+  },
+  {
+    id: 'notif-006',
+    user_id: 'user-pqr',
+    channel: 'sms',
+    status: 'QUEUED',
+    priority: 'high',
+    body: 'Your verification code is 789012',
+    created_at: minsAgo(2),
+    updated_at: minsAgo(2),
+  },
+  {
+    id: 'notif-007',
+    user_id: 'user-stu',
+    channel: 'websocket',
+    status: 'CANCELLED',
+    priority: 'normal',
+    body: 'Live update: price changed',
+    created_at: hoursAgo(5),
+    updated_at: hoursAgo(4),
+  },
+  {
+    id: 'notif-008',
+    user_id: 'user-vwx',
+    channel: 'email',
+    status: 'DELIVERED',
+    priority: 'normal',
+    subject: 'Password Reset',
+    body: 'Click to reset your password.',
+    provider: 'sendgrid',
+    sent_at: hoursAgo(6),
+    created_at: hoursAgo(6),
+    updated_at: hoursAgo(6),
+  },
+  {
+    id: 'notif-009',
+    user_id: 'user-yza',
+    channel: 'sms',
+    status: 'PENDING',
+    priority: 'normal',
+    body: 'Your appointment is tomorrow at 3pm',
+    scheduled_at: new Date(now.getTime() + 7200000).toISOString(),
+    created_at: hoursAgo(1),
+    updated_at: hoursAgo(1),
+  },
+  {
+    id: 'notif-010',
+    user_id: 'user-bcd',
+    channel: 'push',
+    status: 'FAILED',
+    priority: 'high',
+    body: 'Flash sale: 50% off for 1 hour!',
+    provider: 'apns',
+    created_at: hoursAgo(2),
+    updated_at: hoursAgo(2),
+  },
+]
+
+export const mockReports: ReportSummary[] = [
+  { channel: 'email', total: 1200, sent: 1180, delivered: 1150, failed: 20, success_rate: 0.958, p50_latency_ms: 210, p95_latency_ms: 650, date: hoursAgo(24 * 0) },
+  { channel: 'sms', total: 450, sent: 440, delivered: 430, failed: 10, success_rate: 0.956, p50_latency_ms: 95, p95_latency_ms: 320, date: hoursAgo(24 * 0) },
+  { channel: 'push', total: 800, sent: 790, delivered: 770, failed: 10, success_rate: 0.9625, p50_latency_ms: 55, p95_latency_ms: 180, date: hoursAgo(24 * 0) },
+  { channel: 'websocket', total: 2000, sent: 1990, delivered: 1985, failed: 10, success_rate: 0.9925, p50_latency_ms: 12, p95_latency_ms: 45, date: hoursAgo(24 * 0) },
+  { channel: 'webhook', total: 560, sent: 550, delivered: 540, failed: 10, success_rate: 0.964, p50_latency_ms: 120, p95_latency_ms: 450, date: hoursAgo(24 * 0) },
+  // Previous days for charts
+  { channel: 'email', total: 1100, sent: 1070, delivered: 1040, failed: 30, success_rate: 0.945, p50_latency_ms: 230, p95_latency_ms: 700, date: hoursAgo(24 * 1) },
+  { channel: 'sms', total: 420, sent: 410, delivered: 400, failed: 20, success_rate: 0.952, p50_latency_ms: 100, p95_latency_ms: 340, date: hoursAgo(24 * 1) },
+  { channel: 'push', total: 750, sent: 740, delivered: 720, failed: 30, success_rate: 0.96, p50_latency_ms: 60, p95_latency_ms: 200, date: hoursAgo(24 * 1) },
+  { channel: 'email', total: 1050, sent: 1000, delivered: 980, failed: 50, success_rate: 0.933, p50_latency_ms: 240, p95_latency_ms: 720, date: hoursAgo(24 * 2) },
+  { channel: 'sms', total: 390, sent: 380, delivered: 370, failed: 20, success_rate: 0.949, p50_latency_ms: 105, p95_latency_ms: 360, date: hoursAgo(24 * 2) },
+  { channel: 'push', total: 720, sent: 710, delivered: 690, failed: 30, success_rate: 0.958, p50_latency_ms: 62, p95_latency_ms: 210, date: hoursAgo(24 * 2) },
+]
+
+export const mockScheduled: Notification[] = mockNotifications.filter(
+  (n) => n.status === 'PENDING' && n.scheduled_at,
+)

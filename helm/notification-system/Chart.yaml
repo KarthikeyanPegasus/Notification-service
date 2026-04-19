@@ -1,0 +1,14 @@
+apiVersion: v2
+name: notification-system
+description: Multi-channel notification service (API, Worker, UI)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - notifications
+  - email
+  - sms
+  - push
+  - webhook
+maintainers:
+  - name: spidey

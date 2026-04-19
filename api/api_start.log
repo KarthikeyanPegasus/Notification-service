@@ -1,0 +1,6 @@
+2026-04-19T20:28:06.742+0530	fatal	api/main.go:49	running migrations	{"error": "running up migrations: Dirty database version 11. Fix and force version."}
+main.main
+	/Users/spidey/personal/notification-service/api/cmd/api/main.go:49
+runtime.main
+	/opt/homebrew/Cellar/go/1.26.0/libexec/src/runtime/proc.go:290
+exit status 1

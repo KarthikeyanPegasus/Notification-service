@@ -1,0 +1,64 @@
+# OS Specific
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+Thumbs.db
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+.project
+.settings/
+.classpath
+
+# Logs
+*.log
+api/api_out.log
+api/worker_out.log
+api/api_start.log
+
+# Environment Files
+.env
+.env.local
+.env.*.local
+*.env
+*.env.dev
+*.env.prod
+
+# Config
+api/config/config.yaml
+api/config/*.local.yaml
+api/config/*.json
+
+# Go (api/)
+api/bin/
+api/api
+api/worker
+api/cmd/api/api
+api/cmd/worker/worker
+api/vendor/
+api/*.test
+api/coverage.out
+
+# Node/Next.js (ui/)
+ui/node_modules/
+ui/.next/
+ui/out/
+ui/build/
+ui/.eslintcache
+ui/npm-debug.log*
+ui/yarn-debug.log*
+ui/yarn-error.log*
+ui/.pnp*
+ui/.cache/
+
+# Docker
+.docker/
+*.tar.gz
+
+# Scratch files
+scratch/

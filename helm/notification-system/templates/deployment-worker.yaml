@@ -1,0 +1,87 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "notification-system.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "notification-system.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not .Values.worker.autoscaling.enabled }}
+  replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "notification-system.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "notification-system.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.worker.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          securityContext:
+            {{- toYaml .Values.worker.securityContext | nindent 12 }}
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "notification-system.configMapName" . }}
+          env:
+            - name: NS_DATABASE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: DATABASE_DSN
+            - name: NS_REDIS_ADDR
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: REDIS_ADDR
+            - name: NS_PUBSUB_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: GCP_PROJECT_ID
+            - name: NS_AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: AWS_ACCESS_KEY_ID
+            - name: NS_AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: NS_PROVIDERS_SMS_TWILIO_ACCOUNT_SID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: TWILIO_ACCOUNT_SID
+            - name: NS_PROVIDERS_SMS_TWILIO_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: TWILIO_AUTH_TOKEN
+            {{- range $key, $val := .Values.worker.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+{{- end }}

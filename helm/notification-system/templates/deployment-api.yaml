@@ -1,0 +1,93 @@
+{{- if .Values.api.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "notification-system.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "notification-system.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "notification-system.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "notification-system.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.api.podSecurityContext | nindent 8 }}
+      containers:
+        - name: api
+          securityContext:
+            {{- toYaml .Values.api.securityContext | nindent 12 }}
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          envFrom:
+            - configMapRef:
+                name: {{ include "notification-system.configMapName" . }}
+          env:
+            - name: NS_DATABASE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: DATABASE_DSN
+            - name: NS_REDIS_ADDR
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: REDIS_ADDR
+            - name: NS_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: JWT_SECRET
+            - name: NS_JWT_SERVICE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: SERVICE_SECRET
+            - name: NS_PUBSUB_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: GCP_PROJECT_ID
+            {{- range $key, $val := .Values.api.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+{{- end }}

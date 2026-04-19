@@ -1,0 +1,37 @@
+2026-04-19T21:02:22.809+0530	info	api/main.go:62	using mock pubsub publisher
+[GIN-debug] [WARNING] Running in "debug" mode. Switch to "release" mode in production.
+ - using env:	export GIN_MODE=release
+ - using code:	gin.SetMode(gin.ReleaseMode)
+
+[GIN-debug] GET    /health                   --> github.com/spidey/notification-service/internal/handler.NewRouter.func1 (7 handlers)
+[GIN-debug] GET    /metrics                  --> github.com/spidey/notification-service/internal/handler.NewRouter.WrapH.func10 (7 handlers)
+[GIN-debug] GET    /internal/circuit-breakers --> github.com/spidey/notification-service/internal/handler.NewRouter.func2 (7 handlers)
+[GIN-debug] GET    /v1/openapi.yaml          --> github.com/spidey/notification-service/internal/handler.NewRouter.(*RouterGroup).StaticFile.func11 (7 handlers)
+[GIN-debug] HEAD   /v1/openapi.yaml          --> github.com/spidey/notification-service/internal/handler.NewRouter.(*RouterGroup).StaticFile.func11 (7 handlers)
+[GIN-debug] GET    /v1/openapi.json          --> github.com/spidey/notification-service/internal/handler.NewRouter.func3 (7 handlers)
+[GIN-debug] POST   /v1/notifications         --> github.com/spidey/notification-service/internal/handler.(*NotificationHandler).Send-fm (8 handlers)
+[GIN-debug] POST   /v1/notifications/bulk    --> github.com/spidey/notification-service/internal/handler.(*NotificationHandler).SendBulk-fm (8 handlers)
+[GIN-debug] GET    /v1/notifications         --> github.com/spidey/notification-service/internal/handler.(*NotificationHandler).List-fm (8 handlers)
+[GIN-debug] GET    /v1/notifications/scheduled --> github.com/spidey/notification-service/internal/handler.(*NotificationHandler).ListScheduled-fm (8 handlers)
+[GIN-debug] GET    /v1/notifications/:id     --> github.com/spidey/notification-service/internal/handler.(*NotificationHandler).GetByID-fm (8 handlers)
+[GIN-debug] POST   /v1/notifications/:id/sync --> github.com/spidey/notification-service/internal/handler.(*NotificationHandler).SyncStatus-fm (8 handlers)
+[GIN-debug] PATCH  /v1/notifications/:id/schedule --> github.com/spidey/notification-service/internal/handler.(*NotificationHandler).RescheduleNotification-fm (8 handlers)
+[GIN-debug] DELETE /v1/notifications/:id/schedule --> github.com/spidey/notification-service/internal/handler.(*NotificationHandler).CancelNotification-fm (8 handlers)
+[GIN-debug] POST   /v1/otp/send              --> github.com/spidey/notification-service/internal/handler.(*OTPHandler).SendOTP-fm (8 handlers)
+[GIN-debug] POST   /v1/otp/verify            --> github.com/spidey/notification-service/internal/handler.(*OTPHandler).VerifyOTP-fm (8 handlers)
+[GIN-debug] POST   /v1/webhooks/:provider    --> github.com/spidey/notification-service/internal/handler.(*WebhookHandler).HandleProviderEvent-fm (7 handlers)
+[GIN-debug] GET    /v1/users/:user_id/notification-preferences --> github.com/spidey/notification-service/internal/handler.(*PreferencesHandler).GetPreferences-fm (8 handlers)
+[GIN-debug] PUT    /v1/users/:user_id/notification-preferences --> github.com/spidey/notification-service/internal/handler.(*PreferencesHandler).UpdatePreferences-fm (8 handlers)
+[GIN-debug] GET    /v1/reports/channel-metrics --> github.com/spidey/notification-service/internal/handler.(*ReportHandler).ChannelMetrics-fm (8 handlers)
+[GIN-debug] GET    /v1/reports/summary       --> github.com/spidey/notification-service/internal/handler.(*ReportHandler).Summary-fm (8 handlers)
+[GIN-debug] GET    /v1/admin/config/vendors  --> github.com/spidey/notification-service/internal/handler.(*AdminHandler).GetVendorConfigs-fm (8 handlers)
+[GIN-debug] PUT    /v1/admin/config/vendors/:vendor_type --> github.com/spidey/notification-service/internal/handler.(*AdminHandler).UpdateVendorConfig-fm (8 handlers)
+[GIN-debug] GET    /v1/governance/suppressions --> github.com/spidey/notification-service/internal/handler.(*GovernanceHandler).ListSuppressions-fm (8 handlers)
+[GIN-debug] POST   /v1/governance/suppressions --> github.com/spidey/notification-service/internal/handler.(*GovernanceHandler).AddSuppression-fm (8 handlers)
+[GIN-debug] DELETE /v1/governance/suppressions/:id --> github.com/spidey/notification-service/internal/handler.(*GovernanceHandler).DeleteSuppression-fm (8 handlers)
+[GIN-debug] GET    /v1/governance/opt-outs   --> github.com/spidey/notification-service/internal/handler.(*GovernanceHandler).ListOptOuts-fm (8 handlers)
+[GIN-debug] POST   /v1/governance/opt-outs   --> github.com/spidey/notification-service/internal/handler.(*GovernanceHandler).AddOptOut-fm (8 handlers)
+[GIN-debug] DELETE /v1/governance/opt-outs/:id --> github.com/spidey/notification-service/internal/handler.(*GovernanceHandler).DeleteOptOut-fm (8 handlers)
+2026-04-19T21:02:22.813+0530	info	api/main.go:149	api server starting	{"port": 8080}
+2026-04-19T21:02:25.165+0530	info	handler/middleware.go:38	http request	{"method": "HEAD", "path": "/v1/openapi.json", "status": 404, "latency": 0.000049208, "client_ip": "::1", "request_id": "42dfc30c-92ca-4287-b2b6-1962de8951a7"}
+2026-04-19T21:02:37.340+0530	info	handler/middleware.go:38	http request	{"method": "GET", "path": "/v1/openapi.json", "status": 200, "latency": 0.001074458, "client_ip": "::1", "request_id": "e5da0123-f674-418c-81b2-22ef40d5bd84"}

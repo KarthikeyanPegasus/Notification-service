@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "notification-system.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "notification-system.labels" . | nindent 4 }}
+data:
+  NS_PUBSUB_MODE: {{ .Values.config.pubsubMode | quote }}
+  NS_SERVER_PORT: {{ .Values.config.serverPort | quote }}
+  NS_DATABASE_MIGRATION_DIR: {{ .Values.config.migrationDir | quote }}
+  NS_PROVIDERS_WEBHOOK_SIGNING_SECRET: {{ .Values.config.webhookSigningSecret | quote }}
