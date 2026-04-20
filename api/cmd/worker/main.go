@@ -124,7 +124,8 @@ func main() {
 	// Pub/Sub publisher for PublishToPubSubActivity
 	var publisher pubsub.Publisher
 	if cfg.PubSub.Mode == "mock" {
-		publisher = pubsub.NewMockPublisher(log)
+		// IMPORTANT: in mock mode, publisher/subscriber must share the same in-memory broker.
+		publisher = mockPublisher
 	} else if cfg.PubSub.Mode == "redis" {
 		publisher = pubsub.NewRedisPublisher(redisClient.RDB, log)
 	} else {
@@ -237,6 +238,29 @@ func main() {
 			log.Error("config reload listener failed", zap.Error(err))
 		}
 	}()
+
+	// In mock pubsub mode, API and worker run in separate processes and cannot share the in-memory broker.
+	// Poll DB periodically so UI-driven config updates take effect without restarting the worker.
+	if cfg.PubSub.Mode == "mock" {
+		go func() {
+			t := time.NewTicker(10 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					if err := cfg.LoadDynamicOverrides(ctx, vendorConfigRepo); err != nil {
+						log.Warn("failed to reload dynamic config (poll)", zap.Error(err))
+						continue
+					}
+					for _, w := range workers {
+						w.Reload(ctx, cfg.Providers)
+					}
+				}
+			}
+		}()
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

@@ -96,6 +96,7 @@ type Notification struct {
 	ScheduledAt     *time.Time         `json:"scheduled_at,omitempty" db:"scheduled_at"`
 	SentAt          *time.Time         `json:"sent_at,omitempty" db:"sent_at"`
 	DeliveredAt     *time.Time         `json:"delivered_at,omitempty" db:"delivered_at"`
+	Source          string             `json:"source" db:"source"`
 	CreatedAt       time.Time          `json:"created_at" db:"created_at"`
 	UpdatedAt       time.Time          `json:"updated_at" db:"updated_at"`
 }

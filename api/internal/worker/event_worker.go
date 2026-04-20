@@ -18,6 +18,7 @@ type EventWorker struct {
 	notifSvc     *service.NotificationService
 	log          *zap.Logger
 	subscription string
+	source       string
 }
 
 func NewEventWorker(
@@ -31,10 +32,16 @@ func NewEventWorker(
 		sub = "notif-service-ingress"
 	}
 
+	source := "pubsub"
+	if _, ok := subscriber.(*pubsub.RedisSubscriber); ok {
+		source = "redis"
+	}
+
 	return &EventWorker{
 		subscriber:   subscriber,
 		notifSvc:     notifSvc,
 		subscription: sub,
+		source:       source,
 		log:          log.With(zap.String("worker", "event-ingress")),
 	}
 }
@@ -68,7 +75,7 @@ func (w *EventWorker) Start(ctx context.Context) error {
 		)
 
 		startTime := time.Now()
-		resp, err := w.notifSvc.Send(ctx, &req)
+		resp, err := w.notifSvc.Send(ctx, &req, w.source)
 		if err != nil {
 			w.log.Error("failed to process event notification",
 				zap.Error(err),

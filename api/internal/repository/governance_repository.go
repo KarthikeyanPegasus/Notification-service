@@ -38,7 +38,7 @@ func (r *GovernanceRepository) ListSuppressions(ctx context.Context) ([]*domain.
 	}
 	defer rows.Close()
 
-	var list []*domain.Suppression
+	list := make([]*domain.Suppression, 0)
 	for rows.Next() {
 		var s domain.Suppression
 		if err := rows.Scan(&s.ID, &s.Type, &s.Value, &s.Reason, &s.Metadata, &s.CreatedAt); err != nil {
@@ -84,7 +84,7 @@ func (r *GovernanceRepository) ListOptOuts(ctx context.Context) ([]*domain.OptOu
 	}
 	defer rows.Close()
 
-	var list []*domain.OptOut
+	list := make([]*domain.OptOut, 0)
 	for rows.Next() {
 		var o domain.OptOut
 		if err := rows.Scan(&o.ID, &o.UserID, &o.Channel, &o.Reason, &o.Source, &o.CreatedAt); err != nil {

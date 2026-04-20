@@ -96,3 +96,31 @@ func (h *ReportHandler) Summary(c *gin.Context) {
 
 	c.JSON(http.StatusOK, rows)
 }
+// IngressBreakdown handles GET /v1/reports/ingress
+func (h *ReportHandler) IngressBreakdown(c *gin.Context) {
+	dateFrom := c.Query("date_from")
+	dateTo := c.Query("date_to")
+
+	from := time.Now().AddDate(0, 0, -1) // Default last 24h
+	to := time.Now()
+
+	if dateFrom != "" {
+		if t, err := time.Parse(time.RFC3339, dateFrom); err == nil {
+			from = t
+		}
+	}
+	if dateTo != "" {
+		if t, err := time.Parse(time.RFC3339, dateTo); err == nil {
+			to = t
+		}
+	}
+
+	metrics, err := h.notifRepo.GetIngressBreakdown(c.Request.Context(), from, to)
+	if err != nil {
+		h.log.Error("getting ingress metrics", zap.Error(err))
+		respondError(c, http.StatusInternalServerError, "DB_ERROR", "failed to get ingress metrics")
+		return
+	}
+
+	c.JSON(http.StatusOK, metrics)
+}

@@ -4,14 +4,22 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/spidey/notification-service/internal/config"
 	"github.com/spidey/notification-service/internal/domain"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
+)
+
+var (
+	// globalBlockList tracks IPs that hit DDoS thresholds
+	globalBlockList = make(map[string]time.Time)
+	blockListMu     sync.RWMutex
 )
 
 // RequestID injects a unique X-Request-ID into every request.
@@ -143,29 +151,132 @@ func ServiceAuth(secret string) gin.HandlerFunc {
 	}
 }
 
-// RateLimiter applies per-IP rate limiting using token bucket.
-func RateLimiter(rps float64, burst int) gin.HandlerFunc {
-	limiters := make(map[string]*rate.Limiter)
-	mu := make(chan struct{}, 1)
-	mu <- struct{}{}
+// SecurityHeaders adds standard security-focused headers to the response.
+func SecurityHeaders(cfg config.HeadersConfig) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !cfg.EnableSecureHeaders {
+			c.Next()
+			return
+		}
+
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-XSS-Protection", "1; mode=block")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Header("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none';")
+
+		c.Next()
+	}
+}
+
+// RequestSizeLimiter limits the maximum allowed body size.
+func RequestSizeLimiter(maxMB int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if maxMB <= 0 {
+			c.Next()
+			return
+		}
+		
+		limit := int64(maxMB) * 1024 * 1024
+		if c.Request.ContentLength > limit {
+			respondError(c, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds maximum allowed size")
+			c.Abort()
+			return
+		}
+		
+		// Also wrap the reader to be safe for chunked encoding
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
+		c.Next()
+	}
+}
+
+type clientLimiter struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+// RateLimiter appies per-IP rate limiting and DDoS prevention.
+func RateLimiter(cfg config.SecurityConfig) gin.HandlerFunc {
+	limiters := make(map[string]*clientLimiter)
+	var mu sync.Mutex
+
+	// Periodic cleanup of stale limiters to prevent memory leaks
+	go func() {
+		for {
+			time.Sleep(1 * time.Minute)
+			mu.Lock()
+			for ip, cl := range limiters {
+				if time.Since(cl.lastSeen) > 10*time.Minute {
+					delete(limiters, ip)
+				}
+			}
+			mu.Unlock()
+
+			// Also cleanup expired blocks
+			blockListMu.Lock()
+			for ip, expiration := range globalBlockList {
+				if time.Now().After(expiration) {
+					delete(globalBlockList, ip)
+				}
+			}
+			blockListMu.Unlock()
+		}
+	}()
 
 	return func(c *gin.Context) {
+		if !cfg.RateLimit.Enabled {
+			c.Next()
+			return
+		}
+
 		ip := c.ClientIP()
 
-		<-mu
-		limiter, ok := limiters[ip]
-		if !ok {
-			limiter = rate.NewLimiter(rate.Limit(rps), burst)
-			limiters[ip] = limiter
-		}
-		mu <- struct{}{}
+		// Check if IP is currently blocked (DDoS Prevention)
+		blockListMu.RLock()
+		blockedUntil, isBlocked := globalBlockList[ip]
+		blockListMu.RUnlock()
 
-		if !limiter.Allow() {
+		if isBlocked {
+			if time.Now().Before(blockedUntil) {
+				c.Header("X-Security-Action", "Blocked")
+				respondError(c, http.StatusForbidden, "ACCESS_DENIED", "your IP has been temporarily blocked due to excessive requests")
+				c.Abort()
+				return
+			}
+			// Block expired, remove it (cleanup routine will also handle this eventually)
+			blockListMu.Lock()
+			delete(globalBlockList, ip)
+			blockListMu.Unlock()
+		}
+
+		mu.Lock()
+		cl, ok := limiters[ip]
+		if !ok {
+			cl = &clientLimiter{
+				limiter: rate.NewLimiter(rate.Limit(cfg.RateLimit.RPS), cfg.RateLimit.Burst),
+			}
+			limiters[ip] = cl
+		}
+		cl.lastSeen = time.Now()
+		mu.Unlock()
+
+		if !cl.limiter.Allow() {
+			// If request rate is extremely high (e.g., 5x burst), block the IP (DDoS protection)
+			// This is a simple heuristic: if they keep hitting the limit while burst is exhausted.
+			// For a real implementation, we'd track "violations" count.
+			// Here we just use a catastrophic threshold if they try to burst way beyond allowed.
+			if !cl.limiter.AllowN(time.Now(), cfg.RateLimit.Burst*10) {
+				blockListMu.Lock()
+				globalBlockList[ip] = time.Now().Add(cfg.DDoS.BlockDuration)
+				blockListMu.Unlock()
+			}
+
 			c.Header("Retry-After", "1")
 			respondError(c, http.StatusTooManyRequests, "RATE_LIMITED", "too many requests")
 			c.Abort()
 			return
 		}
+
 		c.Next()
 	}
 }

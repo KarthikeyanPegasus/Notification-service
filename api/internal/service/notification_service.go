@@ -67,7 +67,7 @@ type SendResponse struct {
 }
 
 // Send validates and enqueues a notification for delivery.
-func (s *NotificationService) Send(ctx context.Context, req *domain.SendRequest) (*SendResponse, error) {
+func (s *NotificationService) Send(ctx context.Context, req *domain.SendRequest, source string) (*SendResponse, error) {
 	// Resolve idempotency: return existing if key already used
 	existing, err := s.notifRepo.GetByIdempotencyKey(ctx, req.IdempotencyKey)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
@@ -93,7 +93,7 @@ func (s *NotificationService) Send(ctx context.Context, req *domain.SendRequest)
 
 	var results []*SendResponse
 	for _, ch := range req.Channels {
-		resp, err := s.sendToChannel(ctx, req, userID, ch, prefs)
+		resp, err := s.sendToChannel(ctx, req, userID, ch, prefs, source)
 		if err != nil {
 			s.log.Warn("failed to enqueue for channel",
 				zap.String("channel", string(ch)),
@@ -118,6 +118,7 @@ func (s *NotificationService) sendToChannel(
 	userID uuid.UUID,
 	ch domain.Channel,
 	prefs *domain.UserPreferences,
+	source string,
 ) (*SendResponse, error) {
 	// Check opt-in
 	if !prefs.IsChannelEnabled(ch) {
@@ -171,6 +172,7 @@ func (s *NotificationService) sendToChannel(
 		Recipient:       req.Recipient,
 		Status:          domain.StatusPending,
 		ScheduledAt:     req.ScheduledAt,
+		Source:          source,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}

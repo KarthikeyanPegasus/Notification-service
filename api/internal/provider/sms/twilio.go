@@ -45,14 +45,23 @@ func (s *TwilioSender) NormalizePhone(phone string) string {
 func (s *TwilioSender) Send(ctx context.Context, n *domain.Notification) (domain.DeliveryResult, error) {
 	start := time.Now()
 
-	body := n.Recipient
-	if n.RenderedContent != nil && n.RenderedContent.Body != "" {
-		body = n.RenderedContent.Body
+	body := ""
+	if n.RenderedContent != nil {
+		body = strings.TrimSpace(n.RenderedContent.Body)
+	}
+	if body == "" {
+		return domain.DeliveryResult{
+			Provider:     s.ProviderName(),
+			ErrorMessage: "sms body is empty",
+		}, fmt.Errorf("sms body is empty")
 	}
 
+	to := s.NormalizePhone(n.Recipient)
+	from := s.NormalizePhone(s.fromNumber)
+
 	params := url.Values{}
-	params.Set("To", n.Recipient)
-	params.Set("From", s.fromNumber)
+	params.Set("To", to)
+	params.Set("From", from)
 	params.Set("Body", body)
 
 	apiURL := fmt.Sprintf("%s/Accounts/%s/Messages.json", twilioAPIBase, s.accountSID)

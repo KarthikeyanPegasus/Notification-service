@@ -14,6 +14,7 @@ export interface Notification {
   idempotency_key?: string
   scheduled_at?: string
   sent_at?: string
+  source?: string
   created_at: string
   updated_at: string
   attempts?: Attempt[]
@@ -49,6 +50,11 @@ export interface ReportSummary {
   p50_latency_ms: number
   p95_latency_ms: number
   date: string
+}
+
+export interface IngressBreakdown {
+  source: string
+  count: number
 }
 
 export interface PaginatedResponse<T> {
@@ -106,4 +112,16 @@ export interface ScheduledNotification {
   reschedule_count: number
   created_at: string
   updated_at: string
+}
+
+export interface Template {
+  id: string
+  name: string
+  channel: Channel
+  subject?: string | null
+  body: string
+  version: number
+  is_active?: boolean
+  created_at: string
+  updated_at?: string
 }

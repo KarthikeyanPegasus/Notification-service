@@ -114,6 +114,7 @@ func main() {
 	reportHandler := handler.NewReportHandler(webhookEventRepo, notifRepo, log)
 	adminHandler := handler.NewAdminHandler(configSvc, log)
 	govHandler := handler.NewGovernanceHandler(govRepo, log)
+	tmplHandler := handler.NewTemplateHandler(templateRepo, templateSvc, log)
 
 	// Standalone scheduler is now replaced by Temporal's native scheduling logic.
 	// No longer need a local goroutine ticker for ProcessDue.
@@ -130,6 +131,7 @@ func main() {
 		ReportHandler:       reportHandler,
 		AdminHandler:        adminHandler,
 		GovernanceHandler:   govHandler,
+		TemplateHandler:     tmplHandler,
 		CircuitRegistry:     cbRegistry,
 		Config:              cfg,
 	})

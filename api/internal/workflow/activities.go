@@ -103,9 +103,14 @@ func (a *Activities) RenderTemplateActivity(ctx context.Context, req *WorkflowRe
 		}, nil
 	}
 
-	tmpl, err := a.templateRepo.GetByName(ctx, *req.TemplateID)
+	templateUUID, err := uuid.Parse(*req.TemplateID)
 	if err != nil {
-		return nil, fmt.Errorf("template not found: %w", err)
+		return nil, fmt.Errorf("invalid template_id %q: %w", *req.TemplateID, err)
+	}
+
+	tmpl, err := a.templateRepo.GetByID(ctx, templateUUID)
+	if err != nil {
+		return nil, fmt.Errorf("template not found: %s: %w", templateUUID, err)
 	}
 
 	rendered := a.templateRenderer.RenderString(tmpl.Body, req.TemplateVariables)
@@ -146,11 +151,25 @@ func (a *Activities) LogDeliveryActivity(ctx context.Context, entry LogEntry) er
 	if err != nil {
 		return err
 	}
-	
+
+	eventType := domain.EventSent
+	switch entry.Status {
+	case domain.StatusDelivered:
+		eventType = domain.EventDelivered
+	case domain.StatusFailed:
+		eventType = domain.EventFailed
+	case domain.StatusCancelled:
+		eventType = domain.EventCancelled
+	case domain.StatusBounced:
+		eventType = domain.EventBounced
+	case domain.StatusSent:
+		eventType = domain.EventSent
+	}
+
 	_ = a.eventRepo.Append(ctx, &domain.NotificationEvent{
 		ID:             uuid.New(),
 		NotificationID: entry.NotificationID,
-		EventType:      domain.EventDelivered,
+		EventType:      eventType,
 		Metadata:       map[string]any{"msg_id": entry.MsgID, "layer": "cadence_workflow"},
 		CreatedAt:      time.Now(),
 	})

@@ -25,6 +25,7 @@ const navItems = [
   { href: '/notifications', label: 'Notifications', icon: Bell },
   { href: '/reports', label: 'Reports', icon: BarChart3 },
   { href: '/scheduled', label: 'Scheduled', icon: Clock },
+  { href: '/templates', label: 'Templates', icon: Bell },
   { href: '/governance/suppressions', label: 'Suppressions', icon: ShieldAlert },
   { href: '/governance/opt-outs', label: 'Opt-outs', icon: ShieldAlert },
   { href: '/docs', label: 'API Documentation', icon: Book },

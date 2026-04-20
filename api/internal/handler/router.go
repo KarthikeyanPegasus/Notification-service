@@ -20,6 +20,7 @@ type Dependencies struct {
 	ReportHandler       *ReportHandler
 	AdminHandler        *AdminHandler
 	GovernanceHandler   *GovernanceHandler
+	TemplateHandler     *TemplateHandler
 	CircuitRegistry     *circuit.Registry
 	Config              *config.Config
 }
@@ -38,7 +39,9 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	r.Use(Logger(deps.NotificationHandler.log))
 	r.Use(CORS())
 	r.Use(Prometheus())
-	r.Use(RateLimiter(1000, 200)) // 1000 rps, burst 200
+	r.Use(SecurityHeaders(deps.Config.Security.Headers))
+	r.Use(RequestSizeLimiter(deps.Config.Security.Request.MaxBodySizeMB))
+	r.Use(RateLimiter(deps.Config.Security))
 
 	// Health check — no auth required
 	r.GET("/health", func(c *gin.Context) {
@@ -113,6 +116,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	{
 		reports.GET("/channel-metrics", deps.ReportHandler.ChannelMetrics)
 		reports.GET("/summary", deps.ReportHandler.Summary)
+		reports.GET("/ingress", deps.ReportHandler.IngressBreakdown)
 	}
 
 	// Admin config — restricted to authorized admins (using same JWT secret for now)
@@ -134,6 +138,17 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		gov.GET("/opt-outs", deps.GovernanceHandler.ListOptOuts)
 		gov.POST("/opt-outs", deps.GovernanceHandler.AddOptOut)
 		gov.DELETE("/opt-outs/:id", deps.GovernanceHandler.DeleteOptOut)
+	}
+	
+	// Templates
+	templates := v1.Group("/templates")
+	templates.Use(JWTAuth(deps.Config.JWT.Secret, deps.Config.Server.Mode == "debug"))
+	{
+		templates.GET("", deps.TemplateHandler.List)
+		templates.GET("/:id", deps.TemplateHandler.GetByID)
+		templates.POST("", deps.TemplateHandler.Create)
+		templates.PUT("/:id", deps.TemplateHandler.Update)
+		templates.DELETE("/:id", deps.TemplateHandler.Delete)
 	}
 
 	return r

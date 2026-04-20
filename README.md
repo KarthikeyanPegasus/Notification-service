@@ -6,6 +6,7 @@ A high-performance, scalable, and resilient notification engine designed for pro
 
 - **Multi-Channel Support**: Unified API for SMS (Twilio, Vonage, Plivo), Email (SES, Mailgun, SMTP), Push (FCM, APNs, Pushwoosh), and Webhooks.
 - **Event-Driven Entry Point**: Trigger notifications asynchronously by publishing JSON events to a Pub/Sub topic, bypassing the need for synchronous REST calls.
+- **Template Management**: Create and manage reusable message templates for Email, SMS, and Push with channel-specific options and dynamic variable substitution.
 - **Interactive Native Documentation**: A custom-built, high-fidelity API documentation viewer integrated directly into the dashboard.
 - **Resilient Workflows**: Message lifecycle is managed by **Temporal**, providing durable execution with automatic retries and exponential backoff.
 - **Vendor Status Sync**: Real-time polling of external provider APIs to synchronize delivery status and track delivery latency.

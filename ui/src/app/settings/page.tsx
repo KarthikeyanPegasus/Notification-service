@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { getVendorConfigs, updateVendorConfig, VendorConfig } from '@/lib/api'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Mail, MessageSquare, Bell, Save, Loader2, ShieldCheck, AlertCircle, Database, Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -32,10 +33,34 @@ export default function SettingsPage() {
     vonage: { api_key: '', api_secret: '', from: '' }
   })
 
+  const [smsRouting, setSmsRouting] = useState({
+    mode: 'backup' as 'backup' | 'round_robin' | 'publish_all' | 'only',
+    prefer: 'twilio' as 'twilio' | 'plivo' | 'vonage',
+    fallback: 'plivo' as 'twilio' | 'plivo' | 'vonage',
+    only: 'twilio' as 'twilio' | 'plivo' | 'vonage',
+    participants: ['twilio', 'plivo', 'vonage'] as Array<'twilio' | 'plivo' | 'vonage'>,
+  })
+
   const [emailConfig, setEmailConfig] = useState({
     primary: 'smtp',
-    ses: { region: '', access_key_id: '', secret_access_key: '', from_address: '', from_name: '' },
+    ses: { region: '', access_key_id: '', secret_access_key: '', from_address: '', from_name: '', smtp_username: '', smtp_password: '' },
     smtp: { host: '', port: 587, username: '', password: '', from: '' }
+  })
+
+  const [emailRouting, setEmailRouting] = useState({
+    mode: 'backup' as 'backup' | 'round_robin' | 'publish_all' | 'only',
+    prefer: 'ses' as 'ses' | 'smtp' | 'mailgun',
+    fallback: 'smtp' as 'ses' | 'smtp' | 'mailgun',
+    only: 'ses' as 'ses' | 'smtp' | 'mailgun',
+    participants: ['ses', 'smtp', 'mailgun'] as Array<'ses' | 'smtp' | 'mailgun'>,
+  })
+
+  const [pushRouting, setPushRouting] = useState({
+    mode: 'backup' as 'backup' | 'round_robin' | 'publish_all' | 'only',
+    prefer: 'fcm' as 'fcm',
+    fallback: 'fcm' as 'fcm',
+    only: 'fcm' as 'fcm',
+    participants: ['fcm'] as Array<'fcm'>,
   })
 
   useEffect(() => {
@@ -54,9 +79,14 @@ export default function SettingsPage() {
         if (cfg.vendor_type === 'twilio') setSmsConfig(prev => ({ ...prev, twilio: cfg.config_json }))
         if (cfg.vendor_type === 'plivo') setSmsConfig(prev => ({ ...prev, plivo: cfg.config_json }))
         if (cfg.vendor_type === 'vonage') setSmsConfig(prev => ({ ...prev, vonage: cfg.config_json }))
+        if (cfg.vendor_type === 'sms_routing') setSmsRouting(prev => ({ ...prev, ...cfg.config_json }))
         
         if (cfg.vendor_type === 'email') setEmailConfig(prev => ({ ...prev, ...cfg.config_json }))
         if (cfg.vendor_type === 'ses') setEmailConfig(prev => ({ ...prev, ses: cfg.config_json }))
+
+        if (cfg.vendor_type === 'email_routing') setEmailRouting(prev => ({ ...prev, ...cfg.config_json }))
+
+        if (cfg.vendor_type === 'push_routing') setPushRouting(prev => ({ ...prev, ...cfg.config_json }))
       })
     } catch (err) {
       console.error(err)
@@ -173,6 +203,115 @@ export default function SettingsPage() {
       <div className="mt-4">
         {activeTab === 'sms' && (
           <div className="grid gap-6">
+            {(
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg flex items-center gap-2">Delivery Preference</CardTitle>
+                  <CardDescription>Choose how the SMS worker selects vendors when multiple are configured.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-muted-foreground uppercase">Routing Mode</label>
+                      <Select value={smsRouting.mode} onValueChange={(v) => setSmsRouting({ ...smsRouting, mode: v as any })}>
+                        <SelectTrigger><SelectValue placeholder="Select routing mode" /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="backup">Backup (prefer then fallback)</SelectItem>
+                          <SelectItem value="round_robin">Round robin</SelectItem>
+                          <SelectItem value="publish_all">Publish all vendors</SelectItem>
+                          <SelectItem value="only">Only one vendor</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {smsRouting.mode !== 'publish_all' ? (
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">Prefer Vendor</label>
+                        <Select value={smsRouting.prefer} onValueChange={(v) => setSmsRouting({ ...smsRouting, prefer: v as any })}>
+                          <SelectTrigger><SelectValue placeholder="Select preferred vendor" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="twilio">Twilio</SelectItem>
+                            <SelectItem value="plivo">Plivo</SelectItem>
+                            <SelectItem value="vonage">Vonage</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : (
+                      <div />
+                    )}
+                  </div>
+
+                  {smsRouting.mode === 'backup' && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">Fallback Vendor</label>
+                        <Select value={smsRouting.fallback} onValueChange={(v) => setSmsRouting({ ...smsRouting, fallback: v as any })}>
+                          <SelectTrigger><SelectValue placeholder="Select fallback vendor" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="twilio">Twilio</SelectItem>
+                            <SelectItem value="plivo">Plivo</SelectItem>
+                            <SelectItem value="vonage">Vonage</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div />
+                    </div>
+                  )}
+
+                  {smsRouting.mode === 'round_robin' && (
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-muted-foreground uppercase">Round Robin Participants</label>
+                      <div className="grid grid-cols-3 gap-3">
+                        {(['twilio', 'plivo', 'vonage'] as const).map((v) => {
+                          const checked = smsRouting.participants.includes(v)
+                          return (
+                            <label key={v} className="flex items-center gap-2 text-sm">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4"
+                                checked={checked}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? Array.from(new Set([...smsRouting.participants, v]))
+                                    : smsRouting.participants.filter((x) => x !== v)
+                                  setSmsRouting({ ...smsRouting, participants: next as any })
+                                }}
+                              />
+                              {v}
+                            </label>
+                          )
+                        })}
+                      </div>
+                      <p className="text-xs text-muted-foreground">At least one participant must be selected.</p>
+                    </div>
+                  )}
+
+                  {smsRouting.mode === 'only' && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">Only Vendor</label>
+                        <Select value={smsRouting.only} onValueChange={(v) => setSmsRouting({ ...smsRouting, only: v as any })}>
+                          <SelectTrigger><SelectValue placeholder="Select only vendor" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="twilio">Twilio</SelectItem>
+                            <SelectItem value="plivo">Plivo</SelectItem>
+                            <SelectItem value="vonage">Vonage</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div />
+                    </div>
+                  )}
+                </CardContent>
+                <CardFooter className="bg-muted/50 py-3 flex justify-between">
+                  <p className="text-xs text-muted-foreground italic">This controls vendor selection in the worker.</p>
+                  <Button disabled={saving} onClick={() => handleSave('sms_routing', smsRouting)}>
+                    {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
+                    Save Preference
+                  </Button>
+                </CardFooter>
+              </Card>
+            )}
+
             {configs.some(c => c.vendor_type === 'twilio') && (
               <Card>
                 <CardHeader>
@@ -319,6 +458,125 @@ export default function SettingsPage() {
 
         {activeTab === 'email' && (
           <div className="grid gap-6">
+            {(
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    Delivery Preference
+                  </CardTitle>
+                  <CardDescription>Choose how the email worker selects vendors when multiple are configured.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-muted-foreground uppercase">Routing Mode</label>
+                      <Select value={emailRouting.mode} onValueChange={(v) => setEmailRouting({ ...emailRouting, mode: v as any })}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select routing mode" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="backup">Backup (prefer then fallback)</SelectItem>
+                          <SelectItem value="round_robin">Round robin</SelectItem>
+                          <SelectItem value="publish_all">Publish all vendors</SelectItem>
+                          <SelectItem value="only">Only one vendor</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {emailRouting.mode !== 'publish_all' ? (
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">Prefer Vendor</label>
+                        <Select value={emailRouting.prefer} onValueChange={(v) => setEmailRouting({ ...emailRouting, prefer: v as any })}>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select preferred vendor" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="ses">Amazon SES</SelectItem>
+                            <SelectItem value="smtp">SMTP Relay</SelectItem>
+                            <SelectItem value="mailgun">Mailgun</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : (
+                      <div />
+                    )}
+                  </div>
+
+                  {emailRouting.mode === 'backup' && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">Fallback Vendor</label>
+                        <Select value={emailRouting.fallback} onValueChange={(v) => setEmailRouting({ ...emailRouting, fallback: v as any })}>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select fallback vendor" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="ses">Amazon SES</SelectItem>
+                            <SelectItem value="smtp">SMTP Relay</SelectItem>
+                            <SelectItem value="mailgun">Mailgun</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div />
+                    </div>
+                  )}
+
+                  {emailRouting.mode === 'round_robin' && (
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-muted-foreground uppercase">Round Robin Participants</label>
+                      <div className="grid grid-cols-3 gap-3">
+                        {(['ses', 'smtp', 'mailgun'] as const).map((v) => {
+                          const checked = emailRouting.participants.includes(v)
+                          return (
+                            <label key={v} className="flex items-center gap-2 text-sm">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4"
+                                checked={checked}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? Array.from(new Set([...emailRouting.participants, v]))
+                                    : emailRouting.participants.filter((x) => x !== v)
+                                  setEmailRouting({ ...emailRouting, participants: next as any })
+                                }}
+                              />
+                              {v}
+                            </label>
+                          )
+                        })}
+                      </div>
+                      <p className="text-xs text-muted-foreground">At least one participant must be selected.</p>
+                    </div>
+                  )}
+
+                  {emailRouting.mode === 'only' && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">Only Vendor</label>
+                        <Select value={emailRouting.only} onValueChange={(v) => setEmailRouting({ ...emailRouting, only: v as any })}>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select only vendor" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="ses">Amazon SES</SelectItem>
+                            <SelectItem value="smtp">SMTP Relay</SelectItem>
+                            <SelectItem value="mailgun">Mailgun</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div />
+                    </div>
+                  )}
+                </CardContent>
+                <CardFooter className="bg-muted/50 py-3 flex justify-between">
+                  <p className="text-xs text-muted-foreground italic">This controls vendor selection in the worker.</p>
+                  <Button disabled={saving} onClick={() => handleSave('email_routing', emailRouting)}>
+                    {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
+                    Save Preference
+                  </Button>
+                </CardFooter>
+              </Card>
+            )}
+
             {configs.some(c => c.vendor_type === 'ses') && (
               <Card>
                 <CardHeader>
@@ -447,6 +705,109 @@ export default function SettingsPage() {
 
         {activeTab === 'push' && (
           <div className="grid gap-6">
+            {(
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg flex items-center gap-2">Delivery Preference</CardTitle>
+                  <CardDescription>Choose how the push worker selects vendors when multiple are configured.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-muted-foreground uppercase">Routing Mode</label>
+                      <Select value={pushRouting.mode} onValueChange={(v) => setPushRouting({ ...pushRouting, mode: v as any })}>
+                        <SelectTrigger><SelectValue placeholder="Select routing mode" /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="backup">Backup (prefer then fallback)</SelectItem>
+                          <SelectItem value="round_robin">Round robin</SelectItem>
+                          <SelectItem value="publish_all">Publish all vendors</SelectItem>
+                          <SelectItem value="only">Only one vendor</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {pushRouting.mode !== 'publish_all' ? (
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">Prefer Vendor</label>
+                        <Select value={pushRouting.prefer} onValueChange={(v) => setPushRouting({ ...pushRouting, prefer: v as any })}>
+                          <SelectTrigger><SelectValue placeholder="Select preferred vendor" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="fcm">FCM</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : (
+                      <div />
+                    )}
+                  </div>
+
+                  {pushRouting.mode === 'backup' && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">Fallback Vendor</label>
+                        <Select value={pushRouting.fallback} onValueChange={(v) => setPushRouting({ ...pushRouting, fallback: v as any })}>
+                          <SelectTrigger><SelectValue placeholder="Select fallback vendor" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="fcm">FCM</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div />
+                    </div>
+                  )}
+
+                  {pushRouting.mode === 'round_robin' && (
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-muted-foreground uppercase">Round Robin Participants</label>
+                      <div className="grid grid-cols-3 gap-3">
+                        {(['fcm'] as const).map((v) => {
+                          const checked = pushRouting.participants.includes(v)
+                          return (
+                            <label key={v} className="flex items-center gap-2 text-sm">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4"
+                                checked={checked}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? Array.from(new Set([...pushRouting.participants, v]))
+                                    : pushRouting.participants.filter((x) => x !== v)
+                                  setPushRouting({ ...pushRouting, participants: next as any })
+                                }}
+                              />
+                              {v}
+                            </label>
+                          )
+                        })}
+                      </div>
+                      <p className="text-xs text-muted-foreground">At least one participant must be selected.</p>
+                    </div>
+                  )}
+
+                  {pushRouting.mode === 'only' && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">Only Vendor</label>
+                        <Select value={pushRouting.only} onValueChange={(v) => setPushRouting({ ...pushRouting, only: v as any })}>
+                          <SelectTrigger><SelectValue placeholder="Select only vendor" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="fcm">FCM</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div />
+                    </div>
+                  )}
+                </CardContent>
+                <CardFooter className="bg-muted/50 py-3 flex justify-between">
+                  <p className="text-xs text-muted-foreground italic">This controls vendor selection in the worker.</p>
+                  <Button disabled={saving} onClick={() => handleSave('push_routing', pushRouting)}>
+                    {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
+                    Save Preference
+                  </Button>
+                </CardFooter>
+              </Card>
+            )}
+
             {configs.some(c => c.vendor_type === 'fcm') && (
               <Card>
                 <CardHeader>

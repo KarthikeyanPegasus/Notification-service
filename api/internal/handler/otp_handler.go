@@ -72,7 +72,7 @@ func (h *OTPHandler) SendOTP(c *gin.Context) {
 		Recipient: req.PhoneNumber,
 	}
 
-	if _, err := h.notifSvc.Send(c.Request.Context(), sendReq); err != nil {
+	if _, err := h.notifSvc.Send(c.Request.Context(), sendReq, "api"); err != nil {
 		h.log.Error("OTP delivery failed", zap.String("user_id", req.UserID), zap.Error(err))
 		respondDomainError(c, err)
 		return

@@ -51,7 +51,7 @@ func (h *NotificationHandler) Send(c *gin.Context) {
 		// We don't add time.Now() comparison here — the service layer validates
 	}
 
-	resp, err := h.notifSvc.Send(c.Request.Context(), &req)
+	resp, err := h.notifSvc.Send(c.Request.Context(), &req, "api")
 	if err != nil {
 		h.log.Warn("send notification error", zap.Error(err))
 		respondDomainError(c, err)

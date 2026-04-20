@@ -5,6 +5,9 @@ import type {
   ReportSummary,
   ReportFilters,
   ScheduledFilters,
+  ScheduledNotification,
+  Template,
+  IngressBreakdown,
 } from '@/types'
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'
@@ -73,12 +76,12 @@ export async function getReports(filters: ReportFilters): Promise<ReportSummary[
 
 export async function getScheduled(
   filters: ScheduledFilters = {},
-): Promise<PaginatedResponse<Notification>> {
+): Promise<PaginatedResponse<ScheduledNotification>> {
   const params = {
     page_size: filters.page_size ?? 20,
     page: filters.page ?? 1,
   }
-  return fetchJSON<PaginatedResponse<Notification>>(`/v1/notifications/scheduled${buildQuery(params)}`)
+  return fetchJSON<PaginatedResponse<ScheduledNotification>>(`/v1/notifications/scheduled${buildQuery(params)}`)
 }
 
 export async function cancelScheduled(id: string): Promise<void> {
@@ -109,4 +112,45 @@ export async function updateVendorConfig(vendorType: string, config: any): Promi
     method: 'PUT',
     body: JSON.stringify({ config }),
   })
+}
+
+// Templates
+
+export async function getTemplates(channel?: string): Promise<Template[]> {
+  const query = channel ? `?channel=${channel}` : ''
+  return fetchJSON<Template[]>(`/v1/templates${query}`)
+}
+
+export async function getTemplate(id: string): Promise<Template> {
+  return fetchJSON<Template>(`/v1/templates/${id}`)
+}
+
+export async function createTemplate(template: Omit<Template, 'id' | 'version' | 'created_at' | 'updated_at'>): Promise<Template> {
+  return fetchJSON<Template>('/v1/templates', {
+    method: 'POST',
+    body: JSON.stringify(template),
+  })
+}
+
+export async function updateTemplate(id: string, template: Omit<Template, 'id' | 'version' | 'created_at' | 'updated_at'>): Promise<Template> {
+  return fetchJSON<Template>(`/v1/templates/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(template),
+  })
+}
+
+export async function deleteTemplate(id: string): Promise<void> {
+  await fetchJSON<void>(`/v1/templates/${id}`, { method: 'DELETE' })
+}
+
+export async function getIngressBreakdown(filters?: ReportFilters): Promise<IngressBreakdown[]> {
+  const queryParams = new URLSearchParams()
+  if (filters?.date_from) queryParams.set('date_from', filters.date_from)
+  if (filters?.date_to) queryParams.set('date_to', filters.date_to)
+
+  const res = await fetch(`${BASE_URL}/reports/ingress?${queryParams.toString()}`, {
+    headers: { Accept: 'application/json' },
+  })
+  if (!res.ok) throw new Error('Failed to fetch ingress breakdown')
+  return res.json()
 }

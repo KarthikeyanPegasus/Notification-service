@@ -31,14 +31,14 @@ func (r *NotificationRepository) Create(ctx context.Context, n *domain.Notificat
 	const q = `
 		INSERT INTO notifications
 			(id, idempotency_key, user_id, channel, priority, type, template_id,
-			 rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			 rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, source, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		ON CONFLICT (idempotency_key) DO NOTHING`
 
 	tag, err := r.db.Pool.Exec(ctx, q,
 		n.ID, n.IdempotencyKey, n.UserID, n.Channel, n.Priority, n.Type,
 		n.TemplateID, content, n.Recipient, n.Status, n.ScheduledAt,
-		n.SentAt, n.DeliveredAt, n.CreatedAt, n.UpdatedAt,
+		n.SentAt, n.DeliveredAt, n.Source, n.CreatedAt, n.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("inserting notification: %w", err)
@@ -53,7 +53,7 @@ func (r *NotificationRepository) Create(ctx context.Context, n *domain.Notificat
 func (r *NotificationRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Notification, error) {
 	const q = `
 		SELECT id, idempotency_key, user_id, channel, priority, type, template_id,
-		       rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, created_at, updated_at
+		       rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, source, created_at, updated_at
 		FROM notifications WHERE id = $1`
 
 	row := r.db.Pool.QueryRow(ctx, q, id)
@@ -64,7 +64,7 @@ func (r *NotificationRepository) GetByID(ctx context.Context, id uuid.UUID) (*do
 func (r *NotificationRepository) GetByIdempotencyKey(ctx context.Context, key string) (*domain.Notification, error) {
 	const q = `
 		SELECT id, idempotency_key, user_id, channel, priority, type, template_id,
-		       rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, created_at, updated_at
+		       rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, source, created_at, updated_at
 		FROM notifications WHERE idempotency_key = $1`
 
 	row := r.db.Pool.QueryRow(ctx, q, key)
@@ -153,7 +153,7 @@ func (r *NotificationRepository) List(ctx context.Context, f ListFilters) ([]*do
 	offset := (f.Page - 1) * f.PageSize
 	dataQ := fmt.Sprintf(`
 		SELECT id, idempotency_key, user_id, channel, priority, type, template_id,
-		       rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, created_at, updated_at
+		       rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, source, created_at, updated_at
 		FROM notifications %s
 		ORDER BY created_at DESC
 		LIMIT $%d OFFSET $%d`, where, idx, idx+1)
@@ -165,7 +165,7 @@ func (r *NotificationRepository) List(ctx context.Context, f ListFilters) ([]*do
 	}
 	defer rows.Close()
 
-	var results []*domain.Notification
+	results := make([]*domain.Notification, 0)
 	for rows.Next() {
 		n, err := scanNotificationRow(rows)
 		if err != nil {
@@ -183,7 +183,7 @@ func scanNotification(row pgx.Row) (*domain.Notification, error) {
 	err := row.Scan(
 		&n.ID, &n.IdempotencyKey, &n.UserID, &n.Channel, &n.Priority,
 		&n.Type, &n.TemplateID, &contentBytes, &n.Recipient, &n.Status,
-		&n.ScheduledAt, &n.SentAt, &n.DeliveredAt, &n.CreatedAt, &n.UpdatedAt,
+		&n.ScheduledAt, &n.SentAt, &n.DeliveredAt, &n.Source, &n.CreatedAt, &n.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -206,7 +206,7 @@ func scanNotificationRow(rows pgx.Rows) (*domain.Notification, error) {
 	err := rows.Scan(
 		&n.ID, &n.IdempotencyKey, &n.UserID, &n.Channel, &n.Priority,
 		&n.Type, &n.TemplateID, &contentBytes, &n.Recipient, &n.Status,
-		&n.ScheduledAt, &n.SentAt, &n.DeliveredAt, &n.CreatedAt, &n.UpdatedAt,
+		&n.ScheduledAt, &n.SentAt, &n.DeliveredAt, &n.Source, &n.CreatedAt, &n.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scanning notification row: %w", err)
@@ -225,7 +225,7 @@ func (r *NotificationRepository) GetStuckNotifications(ctx context.Context, olde
 	threshold := time.Now().Add(-olderThan)
 	const q = `
 		SELECT id, idempotency_key, user_id, channel, priority, type, template_id,
-		       rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, created_at, updated_at
+		       rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, source, created_at, updated_at
 		FROM notifications 
 		WHERE status IN ($1, $2) AND updated_at < $3
 		ORDER BY updated_at ASC
@@ -237,7 +237,7 @@ func (r *NotificationRepository) GetStuckNotifications(ctx context.Context, olde
 	}
 	defer rows.Close()
 
-	var results []*domain.Notification
+	results := make([]*domain.Notification, 0)
 	for rows.Next() {
 		n, err := scanNotificationRow(rows)
 		if err != nil {
@@ -288,6 +288,40 @@ func (r *NotificationRepository) QuerySummary(ctx context.Context, query, dateFr
 	}
 	if results == nil {
 		results = []ReportSummaryRow{}
+	}
+	return results, rows.Err()
+}
+// IngressBreakdownRow holds counts per source.
+type IngressBreakdownRow struct {
+	Source string `json:"source"`
+	Count  int64  `json:"count"`
+}
+
+// GetIngressBreakdown calculates ingestion counts per source for a time range.
+func (r *NotificationRepository) GetIngressBreakdown(ctx context.Context, from, to time.Time) ([]IngressBreakdownRow, error) {
+	const q = `
+		SELECT source, COUNT(*) 
+		FROM notifications 
+		WHERE created_at >= $1 AND created_at <= $2 
+		GROUP BY source 
+		ORDER BY count DESC`
+
+	rows, err := r.db.Pool.Query(ctx, q, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("querying ingress breakdown: %w", err)
+	}
+	defer rows.Close()
+
+	var results []IngressBreakdownRow
+	for rows.Next() {
+		var row IngressBreakdownRow
+		if err := rows.Scan(&row.Source, &row.Count); err != nil {
+			return nil, fmt.Errorf("scanning ingress breakdown row: %w", err)
+		}
+		results = append(results, row)
+	}
+	if results == nil {
+		results = []IngressBreakdownRow{}
 	}
 	return results, rows.Err()
 }

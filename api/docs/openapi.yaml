@@ -61,6 +61,18 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
+    NotificationTemplate:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        channel: { $ref: '#/components/schemas/Channel' }
+        subject: { type: string, nullable: true }
+        body: { type: string }
+        version: { type: integer }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+
     SendRequest:
       type: object
       required: [idempotency_key, user_id, channels, type, recipient]
@@ -102,6 +114,17 @@ components:
         message: { type: string }
         request_id: { type: string, format: uuid }
 
+  responses:
+    TooManyRequests:
+      description: Rate limit exceeded or IP blocked
+      content:
+        application_json:
+          schema: { $ref: '#/components/schemas/Error' }
+      headers:
+        Retry-After:
+          description: Minimum seconds to wait before retrying
+          schema: { type: integer }
+
 security:
   - BearerAuth: []
 
@@ -130,6 +153,8 @@ paths:
           content:
             application_json:
               schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
     get:
       summary: List notifications
@@ -207,6 +232,8 @@ paths:
                 properties:
                   otp_id: { type: string, format: uuid }
                   expiry_at: { type: string, format: date-time }
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /otp/verify:
     post:
@@ -262,3 +289,84 @@ paths:
       responses:
         '201':
           description: Created
+
+  /templates:
+    get:
+      summary: List all active templates
+      tags: [Templates]
+      parameters:
+        - name: channel
+          in: query
+          schema: { $ref: '#/components/schemas/Channel' }
+      responses:
+        '200':
+          description: Success
+          content:
+            application_json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/NotificationTemplate' }
+    post:
+      summary: Create a new template
+      tags: [Templates]
+      requestBody:
+        required: true
+        content:
+          application_json:
+            schema:
+              type: object
+              required: [name, channel, body]
+              properties:
+                name: { type: string }
+                channel: { $ref: '#/components/schemas/Channel' }
+                subject: { type: string }
+                body: { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application_json:
+              schema: { $ref: '#/components/schemas/NotificationTemplate' }
+
+  /templates/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Get template details
+      tags: [Templates]
+      responses:
+        '200':
+          description: Success
+          content:
+            application_json:
+              schema: { $ref: '#/components/schemas/NotificationTemplate' }
+    put:
+      summary: Update a template
+      tags: [Templates]
+      requestBody:
+        required: true
+        content:
+          application_json:
+            schema:
+              type: object
+              required: [name, channel, body]
+              properties:
+                name: { type: string }
+                channel: { $ref: '#/components/schemas/Channel' }
+                subject: { type: string }
+                body: { type: string }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application_json:
+              schema: { $ref: '#/components/schemas/NotificationTemplate' }
+    delete:
+      summary: Deactivate a template
+      tags: [Templates]
+      responses:
+        '204':
+          description: No Content

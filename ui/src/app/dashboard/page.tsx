@@ -7,7 +7,7 @@ import { ChannelHealthCard } from '@/components/dashboard/channel-health-card'
 import { LiveFeed } from '@/components/dashboard/live-feed'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { KPISkeleton, CardSkeleton } from '@/components/shared/loading-skeleton'
-import { getReports, getNotifications } from '@/lib/api'
+import { getReports, getNotifications, getIngressBreakdown } from '@/lib/api'
 import { getDaysAgo, formatPercent, formatNumber } from '@/lib/utils'
 import type { ChannelHealth, Channel } from '@/types'
 import {
@@ -15,6 +15,10 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
+  Globe,
+  Radio,
+  Database,
+  Terminal,
 } from 'lucide-react'
 
 const CHANNELS: Channel[] = ['email', 'sms', 'push', 'websocket', 'webhook']
@@ -35,7 +39,14 @@ export default function DashboardPage() {
     retry: 1,
   })
 
+  const ingressQuery = useQuery({
+    queryKey: ['ingress', 'dashboard'],
+    queryFn: () => getIngressBreakdown({ date_from: dayAgo, date_to: now }),
+    retry: 1,
+  })
+
   const reports = Array.isArray(reportsQuery.data) ? reportsQuery.data : []
+  const ingressData = Array.isArray(ingressQuery.data) ? ingressQuery.data : []
   const recentData = Array.isArray(recentQuery.data?.data) ? recentQuery.data.data : []
 
   // Compute KPIs from recent notifications (API returns lowercase statuses)
@@ -125,6 +136,37 @@ export default function DashboardPage() {
             : channelHealth.map((h) => (
                 <ChannelHealthCard key={h.channel} health={h} />
               ))}
+        </div>
+      </div>
+
+      {/* Ingress Sources */}
+      <div>
+        <h2 className="text-lg font-semibold mb-4">Ingress Sources (24h)</h2>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          {ingressQuery.isLoading ? (
+            Array.from({ length: 4 }).map((_, i) => <CardSkeleton key={i} />)
+          ) : ingressData.length > 0 ? (
+            ingressData.map((item) => {
+              let Icon = Terminal
+              if (item.source === 'api') Icon = Globe
+              if (item.source === 'pubsub') Icon = Radio
+              if (item.source === 'redis') Icon = Database
+              
+              return (
+                <KpiCard
+                  key={item.source}
+                  title={item.source.toUpperCase()}
+                  value={formatNumber(item.count)}
+                  description="Requests"
+                  icon={Icon}
+                />
+              )
+            })
+          ) : (
+            <div className="col-span-full p-8 text-center border rounded-lg bg-muted/20 text-muted-foreground">
+              No ingress data for the selected period
+            </div>
+          )}
         </div>
       </div>
 

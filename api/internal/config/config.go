@@ -17,6 +17,34 @@ type Config struct {
 	Cadence  CadenceConfig
 	Providers ProviderConfig
 	Log      LogConfig
+	Security SecurityConfig
+}
+
+type SecurityConfig struct {
+	RateLimit RateLimitConfig `mapstructure:"rate_limit"`
+	DDoS      DDoSConfig      `mapstructure:"ddos"`
+	Headers   HeadersConfig   `mapstructure:"headers"`
+	Request   RequestConfig   `mapstructure:"request"`
+}
+
+type RateLimitConfig struct {
+	Enabled bool    `mapstructure:"enabled"`
+	RPS     float64 `mapstructure:"rps"`
+	Burst   int     `mapstructure:"burst"`
+}
+
+type DDoSConfig struct {
+	BlockThreshold int           `mapstructure:"block_threshold"`
+	BlockDuration  time.Duration `mapstructure:"block_duration"`
+}
+
+type HeadersConfig struct {
+	EnableSecureHeaders bool     `mapstructure:"enable_secure_headers"`
+	AllowedOrigins      []string `mapstructure:"allowed_origins"`
+}
+
+type RequestConfig struct {
+	MaxBodySizeMB int `mapstructure:"max_body_size_mb"`
 }
 
 type ServerConfig struct {
@@ -66,14 +94,36 @@ type CadenceConfig struct {
 
 type ProviderConfig struct {
 	Email   EmailProviderConfig
+	EmailRouting RoutingConfig `mapstructure:"email_routing" json:"email_routing"`
 	SMS     SMSProviderConfig
+	SMSRouting RoutingConfig `mapstructure:"sms_routing" json:"sms_routing"`
 	Push    PushProviderConfig
+	PushRouting RoutingConfig `mapstructure:"push_routing" json:"push_routing"`
 	Webhook WebhookProviderConfig
+}
+
+// RoutingConfig controls how a channel worker chooses vendors.
+//
+// Modes:
+// - only: send only via `only` (or `prefer` if `only` is empty)
+// - backup: try `prefer` first (or primary), then fall back to others
+// - round_robin: pick exactly one vendor per message, rotating across configured vendors
+// - publish_all: send the same message through all configured vendors
+type RoutingConfig struct {
+	Mode   string `mapstructure:"mode" json:"mode"`
+	Prefer string `mapstructure:"prefer" json:"prefer"`
+	// Fallback is used in backup mode to pick the second-choice vendor.
+	// If empty, the worker falls back to any remaining configured vendors.
+	Fallback string `mapstructure:"fallback" json:"fallback"`
+	Only     string `mapstructure:"only" json:"only"`
+	// Participants is used in round_robin mode to restrict which vendors participate.
+	// If empty, all configured vendors participate.
+	Participants []string `mapstructure:"participants" json:"participants"`
 }
 
 type EmailProviderConfig struct {
 	// Primary provider: ses | mailgun | smtp
-	Primary string            `mapstructure:"primary"`
+	Primary string            `mapstructure:"primary" json:"primary"`
 	SES     SESConfig         `mapstructure:"ses"`
 	Mailgun MailgunConfig     `mapstructure:"mailgun"`
 	SMTP    SMTPConfig        `mapstructure:"smtp"`
@@ -112,21 +162,21 @@ type SMSProviderConfig struct {
 }
 
 type TwilioConfig struct {
-	AccountSID string `mapstructure:"account_sid"`
-	AuthToken  string `mapstructure:"auth_token"`
-	FromNumber string `mapstructure:"from_number"`
+	AccountSID string `mapstructure:"account_sid" json:"account_sid"`
+	AuthToken  string `mapstructure:"auth_token" json:"auth_token"`
+	FromNumber string `mapstructure:"from_number" json:"from_number"`
 }
 
 type PlivoConfig struct {
-	AuthID    string `mapstructure:"auth_id"`
-	AuthToken string `mapstructure:"auth_token"`
-	FromNumber string `mapstructure:"from_number"`
+	AuthID     string `mapstructure:"auth_id" json:"auth_id"`
+	AuthToken  string `mapstructure:"auth_token" json:"auth_token"`
+	FromNumber string `mapstructure:"from_number" json:"from_number"`
 }
 
 type VonageConfig struct {
-	APIKey    string `mapstructure:"api_key"`
-	APISecret string `mapstructure:"api_secret"`
-	From      string `mapstructure:"from"`
+	APIKey    string `mapstructure:"api_key" json:"api_key"`
+	APISecret string `mapstructure:"api_secret" json:"api_secret"`
+	From      string `mapstructure:"from" json:"from"`
 }
 
 type PushProviderConfig struct {
@@ -218,7 +268,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("pubsub.mode", "mock")
 	v.SetDefault("pubsub.project_id", "local-project")
 	v.SetDefault("pubsub.events_topic", "notifications-ingress")
-	v.SetDefault("pubsub.events_subscription", "notif-service-ingress")
+	v.SetDefault("pubsub.events_subscription", "ingress")
 
 	v.SetDefault("cadence.mode", "temporal")
 	v.SetDefault("cadence.host_port", "localhost:7233")
@@ -229,8 +279,21 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("providers.webhook.timeout_seconds", 30)
 	v.SetDefault("providers.webhook.max_retries", 5)
 
+	v.SetDefault("providers.email_routing.mode", "backup")
+	v.SetDefault("providers.sms_routing.mode", "backup")
+	v.SetDefault("providers.push_routing.mode", "backup")
+
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
+
+	v.SetDefault("security.rate_limit.enabled", true)
+	v.SetDefault("security.rate_limit.rps", 100.0)
+	v.SetDefault("security.rate_limit.burst", 50)
+	v.SetDefault("security.ddos.block_threshold", 500)
+	v.SetDefault("security.ddos.block_duration", "5m")
+	v.SetDefault("security.headers.enable_secure_headers", true)
+	v.SetDefault("security.headers.allowed_origins", []string{"*"})
+	v.SetDefault("security.request.max_body_size_mb", 2)
 }
 
 func validate(cfg *Config) error {

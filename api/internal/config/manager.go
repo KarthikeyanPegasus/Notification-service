@@ -48,6 +48,16 @@ func (cfg *Config) LoadDynamicOverrides(ctx context.Context, repo Repository) er
 			if err := json.Unmarshal(o.ConfigJSON, &emailCfg); err == nil {
 				cfg.Providers.Email = emailCfg
 			}
+		case "email_routing":
+			var r RoutingConfig
+			if err := json.Unmarshal(o.ConfigJSON, &r); err == nil {
+				cfg.Providers.EmailRouting = r
+			}
+		case "sms_routing":
+			var r RoutingConfig
+			if err := json.Unmarshal(o.ConfigJSON, &r); err == nil {
+				cfg.Providers.SMSRouting = r
+			}
 		case "ses":
 			var s SESConfig
 			if err := json.Unmarshal(o.ConfigJSON, &s); err == nil {
@@ -63,6 +73,11 @@ func (cfg *Config) LoadDynamicOverrides(ctx context.Context, repo Repository) er
 			var pushCfg PushProviderConfig
 			if err := json.Unmarshal(o.ConfigJSON, &pushCfg); err == nil {
 				cfg.Providers.Push = pushCfg
+			}
+		case "push_routing":
+			var r RoutingConfig
+			if err := json.Unmarshal(o.ConfigJSON, &r); err == nil {
+				cfg.Providers.PushRouting = r
 			}
 		case "fcm":
 			var s FCMConfig

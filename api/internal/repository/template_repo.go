@@ -81,7 +81,7 @@ func (r *TemplateRepository) List(ctx context.Context, channel *domain.Channel) 
 	}
 	defer rows.Close()
 
-	var templates []*domain.NotificationTemplate
+	templates := make([]*domain.NotificationTemplate, 0)
 	for rows.Next() {
 		t := &domain.NotificationTemplate{}
 		if err := rows.Scan(&t.ID, &t.Name, &t.Channel, &t.Subject, &t.Body, &t.Version, &t.IsActive, &t.CreatedAt, &t.CreatedAt); err != nil {
@@ -90,4 +90,21 @@ func (r *TemplateRepository) List(ctx context.Context, channel *domain.Channel) 
 		templates = append(templates, t)
 	}
 	return templates, rows.Err()
+}
+
+func (r *TemplateRepository) Update(ctx context.Context, t *domain.NotificationTemplate) error {
+	const q = `
+		UPDATE notification_templates
+		SET name=$2, channel=$3, subject=$4, body=$5, version=$6, is_active=$7, updated_at=$8
+		WHERE id=$1`
+	_, err := r.db.Pool.Exec(ctx, q,
+		t.ID, t.Name, t.Channel, t.Subject, t.Body, t.Version, t.IsActive, time.Now(),
+	)
+	return err
+}
+
+func (r *TemplateRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	const q = `UPDATE notification_templates SET is_active=FALSE, updated_at=$2 WHERE id=$1`
+	_, err := r.db.Pool.Exec(ctx, q, id, time.Now())
+	return err
 }
