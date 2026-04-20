@@ -248,7 +248,7 @@ export default function AppStorePage() {
               </div>
             </div>
             <div className={cn(
-              "border-2 border-dashed rounded-lg p-6 flex flex-col items-center justify-center transition-colors text-center",
+              "relative border-2 border-dashed rounded-lg p-6 flex flex-col items-center justify-center transition-colors text-center",
               formData.service_account ? "border-green-500/50 bg-green-50/50" : "border-muted-foreground/20 hover:border-primary/50 hover:bg-primary/5"
             )}>
               <div className="mb-2 h-10 w-10 rounded-full bg-muted flex items-center justify-center">

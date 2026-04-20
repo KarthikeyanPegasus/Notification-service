@@ -9,7 +9,7 @@ import type { Channel, Status, NotificationFilters } from '@/types'
 import { ChannelIcon, channelLabel } from '@/components/shared/channel-icon'
 import { cn } from '@/lib/utils'
 
-const CHANNELS: Channel[] = ['email', 'sms', 'push', 'websocket', 'webhook']
+const CHANNELS: Channel[] = ['email', 'sms', 'push', 'websocket', 'webhook', 'slack']
 const STATUSES: Status[] = ['PENDING', 'QUEUED', 'SENT', 'DELIVERED', 'FAILED', 'CANCELLED']
 
 const statusColors: Record<Status, string> = {

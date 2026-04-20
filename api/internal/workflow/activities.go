@@ -2,7 +2,9 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -94,6 +96,21 @@ func (a *Activities) CheckPreferencesActivity(ctx context.Context, req *Workflow
 
 func (a *Activities) RenderTemplateActivity(ctx context.Context, req *WorkflowRequest) (*RenderedNotification, error) {
 	if req.TemplateID == nil {
+		n, err := a.notifRepo.GetByID(ctx, req.ID)
+		if err == nil && n != nil && n.RenderedContent != nil {
+			body := strings.TrimSpace(n.RenderedContent.Body)
+			if body != "" {
+				return &RenderedNotification{
+					ID:        req.ID,
+					UserID:    uuid.MustParse(req.UserID),
+					Channel:   req.Channel,
+					Recipient: req.Recipient,
+					Payload:   []byte(body),
+				}, nil
+			}
+		} else if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return nil, fmt.Errorf("loading notification for render: %w", err)
+		}
 		return &RenderedNotification{
 			ID:        req.ID,
 			UserID:    uuid.MustParse(req.UserID),

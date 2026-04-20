@@ -90,6 +90,11 @@ func (cfg *Config) LoadDynamicOverrides(ctx context.Context, repo Repository) er
 			if err := json.Unmarshal(o.ConfigJSON, &webhookCfg); err == nil {
 				cfg.Providers.Webhook = webhookCfg
 			}
+		case "slack":
+			var slackCfg SlackProviderConfig
+			if err := json.Unmarshal(o.ConfigJSON, &slackCfg); err == nil {
+				cfg.Providers.Slack = slackCfg
+			}
 		}
 	}
 	return nil

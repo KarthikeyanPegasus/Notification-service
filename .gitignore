@@ -59,6 +59,7 @@ ui/.cache/
 # Docker
 .docker/
 *.tar.gz
+.next/
 
 # Scratch files
 scratch/

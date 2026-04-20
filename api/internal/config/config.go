@@ -100,6 +100,14 @@ type ProviderConfig struct {
 	Push    PushProviderConfig
 	PushRouting RoutingConfig `mapstructure:"push_routing" json:"push_routing"`
 	Webhook WebhookProviderConfig
+	Slack   SlackProviderConfig `mapstructure:"slack" json:"slack"`
+}
+
+// SlackProviderConfig holds defaults for Slack Incoming Webhooks (HTTP JSON API).
+type SlackProviderConfig struct {
+	WebhookURL      string `mapstructure:"webhook_url" json:"webhook_url"`
+	TimeoutSeconds  int    `mapstructure:"timeout_seconds" json:"timeout_seconds"`
+	DefaultUsername string `mapstructure:"default_username" json:"default_username"`
 }
 
 // RoutingConfig controls how a channel worker chooses vendors.
@@ -278,6 +286,7 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("providers.webhook.timeout_seconds", 30)
 	v.SetDefault("providers.webhook.max_retries", 5)
+	v.SetDefault("providers.slack.timeout_seconds", 30)
 
 	v.SetDefault("providers.email_routing.mode", "backup")
 	v.SetDefault("providers.sms_routing.mode", "backup")

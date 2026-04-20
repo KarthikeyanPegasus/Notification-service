@@ -29,7 +29,7 @@ const SMS_MAX_LEN = 160
 
 const formSchema = z.object({
   name: z.string().min(2, 'Name must be at least 2 characters'),
-  channel: z.enum(['email', 'sms', 'push', 'webhook', 'websocket']),
+  channel: z.enum(['email', 'sms', 'push', 'webhook', 'websocket', 'slack']),
   subject: z.string().optional(),
   body: z.string().min(1, 'Body is required'),
 }).superRefine((val, ctx) => {
@@ -116,6 +116,7 @@ export function TemplateForm({ template, onSuccess, onCancel }: any) {
                     <SelectItem value="push">Push</SelectItem>
                     <SelectItem value="webhook">Webhook</SelectItem>
                     <SelectItem value="websocket">WebSocket</SelectItem>
+                    <SelectItem value="slack">Slack</SelectItem>
                   </SelectContent>
                 </Select>
                 <FormMessage />
@@ -149,7 +150,11 @@ export function TemplateForm({ template, onSuccess, onCancel }: any) {
           render={({ field }) => (
             <FormItem>
               <FormLabel>
-                {currentChannel === 'email' ? 'Email Body (Markdown/HTML)' : 'Message Content'}
+                {currentChannel === 'email'
+                  ? 'Email Body (Markdown/HTML)'
+                  : currentChannel === 'slack'
+                    ? 'Slack message (plain text)'
+                    : 'Message Content'}
               </FormLabel>
               <FormControl>
                 <Textarea 

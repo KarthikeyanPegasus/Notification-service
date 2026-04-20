@@ -15,11 +15,12 @@ const (
 	ChannelPush      Channel = "push"
 	ChannelWebSocket Channel = "websocket"
 	ChannelWebhook   Channel = "webhook"
+	ChannelSlack     Channel = "slack"
 )
 
 func (c Channel) IsValid() bool {
 	switch c {
-	case ChannelEmail, ChannelSMS, ChannelPush, ChannelWebSocket, ChannelWebhook:
+	case ChannelEmail, ChannelSMS, ChannelPush, ChannelWebSocket, ChannelWebhook, ChannelSlack:
 		return true
 	}
 	return false
@@ -219,9 +220,11 @@ func (p *UserPreferences) IsChannelEnabled(ch Channel) bool {
 type SendRequest struct {
 	IdempotencyKey    string            `json:"idempotency_key" validate:"required,max=128"`
 	UserID            string            `json:"user_id" validate:"required,uuid4"`
-	Channels          []Channel         `json:"channels" validate:"required,min=1,dive,oneof=email sms push websocket webhook"`
+	Channels          []Channel         `json:"channels" validate:"required,min=1,dive,oneof=email sms push websocket webhook slack"`
 	Type              string            `json:"type" validate:"required,max=50"`
 	TemplateID        *string           `json:"template_id,omitempty" validate:"omitempty,uuid4"`
+	// Body is optional plain text / template string for channels that are not address-based (e.g. Slack message text).
+	Body              string            `json:"body,omitempty" validate:"omitempty,max=50000"`
 	TemplateVariables map[string]string `json:"template_variables,omitempty"`
 	ScheduledAt       *time.Time        `json:"scheduled_at,omitempty"`
 	Recipient         string            `json:"recipient,omitempty"`
@@ -233,7 +236,7 @@ type BulkSendRequest struct {
 	TemplateID        string            `json:"template_id" validate:"required,uuid4"`
 	TemplateVariables map[string]string `json:"template_variables,omitempty"`
 	UserSegment       map[string]any    `json:"user_segment" validate:"required"`
-	Channels          []Channel         `json:"channels" validate:"required,min=1"`
+	Channels          []Channel         `json:"channels" validate:"required,min=1,dive,oneof=email sms push websocket webhook slack"`
 	ScheduledAt       *time.Time        `json:"scheduled_at,omitempty"`
 }
 

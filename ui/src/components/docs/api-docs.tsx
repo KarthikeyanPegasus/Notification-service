@@ -7,6 +7,8 @@ import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { OperationView } from './operation-view'
 
+const apiOrigin = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'
+
 export function APIDocs() {
   const [spec, setSpec] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -15,7 +17,7 @@ export function APIDocs() {
   const [search, setSearch] = useState('')
 
   useEffect(() => {
-    fetch('http://localhost:8080/v1/openapi.json')
+    fetch(`${apiOrigin}/v1/openapi.json`)
       .then(res => res.json())
       .then(data => {
         setSpec(data)

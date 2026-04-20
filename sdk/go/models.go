@@ -10,6 +10,7 @@ const (
 	ChannelPush      Channel = "push"
 	ChannelWebSocket Channel = "websocket"
 	ChannelWebhook   Channel = "webhook"
+	ChannelSlack     Channel = "slack"
 )
 
 type Priority string
@@ -39,21 +40,21 @@ type RenderedContent struct {
 }
 
 type Notification struct {
-	ID               string             `json:"id"`
-	IdempotencyKey   string             `json:"idempotency_key"`
-	UserID           string             `json:"user_id"`
-	Channel          Channel            `json:"channel"`
-	Priority         Priority           `json:"priority"`
-	Type             string             `json:"type"`
-	TemplateID       *string            `json:"template_id,omitempty"`
-	RenderedContent  *RenderedContent   `json:"rendered_content,omitempty"`
-	Recipient        string             `json:"recipient"`
-	Status           NotificationStatus `json:"status"`
-	ScheduledAt      *time.Time         `json:"scheduled_at,omitempty"`
-	SentAt           *time.Time         `json:"sent_at,omitempty"`
-	DeliveredAt      *time.Time         `json:"delivered_at,omitempty"`
-	CreatedAt        time.Time          `json:"created_at"`
-	UpdatedAt        time.Time          `json:"updated_at"`
+	ID              string             `json:"id"`
+	IdempotencyKey  string             `json:"idempotency_key"`
+	UserID          string             `json:"user_id"`
+	Channel         Channel            `json:"channel"`
+	Priority        Priority           `json:"priority"`
+	Type            string             `json:"type"`
+	TemplateID      *string            `json:"template_id,omitempty"`
+	RenderedContent *RenderedContent   `json:"rendered_content,omitempty"`
+	Recipient       string             `json:"recipient"`
+	Status          NotificationStatus `json:"status"`
+	ScheduledAt     *time.Time         `json:"scheduled_at,omitempty"`
+	SentAt          *time.Time         `json:"sent_at,omitempty"`
+	DeliveredAt     *time.Time         `json:"delivered_at,omitempty"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
 }
 
 type SendRequest struct {
@@ -61,10 +62,19 @@ type SendRequest struct {
 	UserID            string            `json:"user_id"`
 	Channels          []Channel         `json:"channels"`
 	Type              string            `json:"type"`
+	Body              string            `json:"body,omitempty"`
 	TemplateID        string            `json:"template_id,omitempty"`
 	TemplateVariables map[string]string `json:"template_variables,omitempty"`
-	Recipient         string            `json:"recipient"`
+	Recipient         string            `json:"recipient,omitempty"`
 	ScheduledAt       *time.Time        `json:"scheduled_at,omitempty"`
+}
+
+// NotifyOptions carries optional fields for NotifyBy* helpers. Nil is treated as zero values.
+type NotifyOptions struct {
+	Body              string
+	TemplateID        string
+	TemplateVariables map[string]string
+	ScheduledAt       *time.Time
 }
 
 type SendResponse struct {
@@ -94,10 +104,10 @@ type NotificationDetailResponse struct {
 }
 
 type OTPSendRequest struct {
-	UserID      string `json:"user_id"`
-	PhoneNumber string `json:"phone_number"`
-	Purpose     string `json:"purpose"`
-	ExpirySeconds int  `json:"expiry_seconds,omitempty"`
+	UserID        string `json:"user_id"`
+	PhoneNumber   string `json:"phone_number"`
+	Purpose       string `json:"purpose"`
+	ExpirySeconds int    `json:"expiry_seconds,omitempty"`
 }
 
 type OTPSendResponse struct {
@@ -116,9 +126,9 @@ type OTPVerifyResponse struct {
 }
 
 type ReportSummaryItem struct {
-	Channel       Channel `json:"channel"`
-	Total         int     `json:"total"`
-	SuccessRate   float64 `json:"success_rate"`
-	P50LatencyMs  float64 `json:"p50_latency_ms"`
-	P95LatencyMs  float64 `json:"p95_latency_ms"`
+	Channel      Channel `json:"channel"`
+	Total        int     `json:"total"`
+	SuccessRate  float64 `json:"success_rate"`
+	P50LatencyMs float64 `json:"p50_latency_ms"`
+	P95LatencyMs float64 `json:"p95_latency_ms"`
 }

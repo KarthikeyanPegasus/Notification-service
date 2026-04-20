@@ -24,6 +24,7 @@ const CHANNEL_COLORS: Record<Channel | string, string> = {
   push:      '#f97316',
   websocket: '#06b6d4',
   webhook:   '#ec4899',
+  slack:     '#8b5cf6',
 }
 
 export function DeliveryRateChart({ reports }: DeliveryRateChartProps) {

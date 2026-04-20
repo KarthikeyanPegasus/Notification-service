@@ -72,6 +72,7 @@ func (r *Registry) registerAll() {
 	// Other
 	r.register("websocket-gateway", pushCfg)
 	r.register("webhook-delivery", pushCfg)
+	r.register("slack", pushCfg)
 }
 
 func (r *Registry) register(vendor string, cfg BreakerConfig) {

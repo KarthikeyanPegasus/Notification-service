@@ -1,4 +1,4 @@
-import { Mail, MessageSquare, Bell, Globe, Webhook, type LucideIcon } from 'lucide-react'
+import { Mail, MessageSquare, Bell, Globe, Webhook, Slack, type LucideIcon } from 'lucide-react'
 import type { Channel } from '@/types'
 import { cn } from '@/lib/utils'
 
@@ -14,6 +14,7 @@ const channelIcons: Record<Channel, LucideIcon> = {
   push:      Bell,
   websocket: Globe,
   webhook:   Webhook,
+  slack:     Slack,
 }
 
 const channelColors: Record<Channel, string> = {
@@ -22,6 +23,7 @@ const channelColors: Record<Channel, string> = {
   push:      'text-orange-500',
   websocket: 'text-cyan-500',
   webhook:   'text-pink-500',
+  slack:     'text-violet-500',
 }
 
 export function ChannelIcon({ channel, className, size = 16 }: ChannelIconProps) {
@@ -32,5 +34,6 @@ export function ChannelIcon({ channel, className, size = 16 }: ChannelIconProps)
 
 export function channelLabel(channel: Channel): string {
   if (!channel || typeof channel !== 'string') return 'Unknown'
+  if (channel === 'slack') return 'Slack'
   return channel.charAt(0).toUpperCase() + channel.slice(1)
 }

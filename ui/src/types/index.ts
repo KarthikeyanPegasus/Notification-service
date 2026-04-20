@@ -1,4 +1,4 @@
-export type Channel = 'email' | 'sms' | 'push' | 'websocket' | 'webhook'
+export type Channel = 'email' | 'sms' | 'push' | 'websocket' | 'webhook' | 'slack'
 export type Status = 'PENDING' | 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | 'CANCELLED'
 export type Priority = 'low' | 'normal' | 'high' | 'critical'
 

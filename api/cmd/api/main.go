@@ -94,6 +94,10 @@ func main() {
 	vendorConfigRepo := repository.NewVendorConfigRepository(db)
 	govRepo := repository.NewGovernanceRepository(db)
 
+	if err := cfg.LoadDynamicOverrides(ctx, vendorConfigRepo); err != nil {
+		log.Warn("failed to load dynamic vendor config into memory", zap.Error(err))
+	}
+
 	// Services
 	templateSvc := service.NewTemplateService(templateRepo, redisClient)
 	prefsSvc := service.NewPreferencesService(redisClient)

@@ -6,6 +6,7 @@ import (
 	"github.com/spidey/notification-service/internal/config"
 	"github.com/spidey/notification-service/internal/provider/email"
 	"github.com/spidey/notification-service/internal/provider/push"
+	"github.com/spidey/notification-service/internal/provider/slack"
 	"github.com/spidey/notification-service/internal/provider/sms"
 	"github.com/spidey/notification-service/internal/provider/webhook"
 )
@@ -66,4 +67,9 @@ func InitializePushSenders(cfg config.PushProviderConfig) []Sender {
 // InitializeWebhookDispatcher creates a webhook dispatcher based on config.
 func InitializeWebhookDispatcher(cfg config.WebhookProviderConfig) *webhook.Dispatcher {
 	return webhook.NewDispatcher(cfg)
+}
+
+// InitializeSlackSender creates a Slack Incoming Webhook sender.
+func InitializeSlackSender(cfg config.SlackProviderConfig) *slack.Sender {
+	return slack.NewSender(cfg)
 }

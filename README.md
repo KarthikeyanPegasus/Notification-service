@@ -1,10 +1,11 @@
 # Notification Service
 
-A high-performance, scalable, and resilient notification engine designed for production-level workloads. It supports unified multi-channel delivery, avent-driven triggers via Pub/Sub, Temporal-driven reliability, and an interactive native documentation suite.
+A high-performance, scalable, and resilient notification engine designed for production-level workloads. It supports unified multi-channel delivery, event-driven triggers via Pub/Sub, Temporal-driven reliability, and an interactive native documentation suite.
 
 ## ✨ Key Features
 
-- **Multi-Channel Support**: Unified API for SMS (Twilio, Vonage, Plivo), Email (SES, Mailgun, SMTP), Push (FCM, APNs, Pushwoosh), and Webhooks.
+- **Multi-Channel Support**: Unified API for SMS (Twilio, Vonage, Plivo), Email (SES, Mailgun, SMTP), Push (FCM, APNs, Pushwoosh), Webhooks, WebSockets, and **Slack** (Incoming Webhook JSON via dedicated `slack` channel and `notifications-slack` worker topic).
+- **SMS templates**: Template bodies are capped at **160 characters** (GSM-style segment) in API and dashboard.
 - **Event-Driven Entry Point**: Trigger notifications asynchronously by publishing JSON events to a Pub/Sub topic, bypassing the need for synchronous REST calls.
 - **Template Management**: Create and manage reusable message templates for Email, SMS, and Push with channel-specific options and dynamic variable substitution.
 - **Interactive Native Documentation**: A custom-built, high-fidelity API documentation viewer integrated directly into the dashboard.
@@ -55,7 +56,9 @@ The system is built with a decoupled, asynchronous architecture powered by Tempo
 - **Next.js (App Router)** with a macOS Sequoia-inspired design system.
 - **Live Metrics**: Real-time throughput, success rates, and delivery latency monitoring.
 - **Explorer**: Detailed view of delivery attempts, event timelines, and manual status syncing.
-- **API Docs**: Searchable, high-fidelity documentation for all endpoints and schemas.
+- **API Docs**: Searchable documentation loaded from the API OpenAPI spec (`NEXT_PUBLIC_API_URL` in production).
+- **Settings**: FCM (service account upload, status) and a **Social** tab for vendor credentials (Slack, Discord, Teams, Telegram) without routing preferences.
+- **Sidebar**: Collapsible rail; logo toggles layout; hover expands temporarily when collapsed.
 
 ---
 
@@ -75,6 +78,15 @@ You can trigger notifications by publishing a JSON payload to the `notifications
 ```
 
 Support for GCP Pub/Sub, Redis Pub/Sub, and Mock drivers is included.
+
+Channel-specific worker topics include `notifications-slack` for Slack delivery (see `api/internal/pubsub/client.go`).
+
+---
+
+## 📚 API specification & Go SDK
+
+- **OpenAPI**: `api/docs/openapi.yaml` (also served at `/v1/openapi.yaml` and `/v1/openapi.json` on the API).
+- **Go client**: `sdk/go` — see [`sdk/README.md`](sdk/README.md) for install and examples (`NotifyBySlack`, `NotifyBySMS`, etc., or `Send` for multi-channel).
 
 ---
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -148,7 +149,25 @@ func (s *NotificationService) sendToChannel(
 			templateID = &parsed
 		}
 	}
-	rendered, err := s.templateSvc.RenderForChannel(ctx, templateID, ch, req.TemplateVariables, req.Recipient)
+	fallbackBody := req.Body
+	if fallbackBody == "" {
+		fallbackBody = req.Recipient
+	}
+	if ch == domain.ChannelSlack {
+		// Recipient is often the Incoming Webhook URL; never use that as template/body fallback.
+		if strings.Contains(fallbackBody, "hooks.slack.com") {
+			fallbackBody = ""
+		}
+		if fallbackBody == "" && req.TemplateVariables != nil {
+			if v := strings.TrimSpace(req.TemplateVariables["message"]); v != "" {
+				fallbackBody = v
+			} else if v := strings.TrimSpace(req.TemplateVariables["text"]); v != "" {
+				fallbackBody = v
+			}
+		}
+	}
+
+	rendered, err := s.templateSvc.RenderForChannel(ctx, templateID, ch, req.TemplateVariables, fallbackBody)
 	if err != nil {
 		return nil, fmt.Errorf("rendering template: %w", err)
 	}
@@ -481,6 +500,10 @@ func (s *NotificationService) getSenderForProvider(name string, channel domain.C
 			if snd.ProviderName() == name {
 				return snd, nil
 			}
+		}
+	case domain.ChannelSlack:
+		if name == "slack" {
+			return provider.InitializeSlackSender(s.cfg.Providers.Slack), nil
 		}
 	}
 	return nil, fmt.Errorf("provider %s not found for channel %s", name, channel)

@@ -18,6 +18,7 @@ var TopicID = map[string]string{
 	"push":      "notifications-push",
 	"websocket": "notifications-websocket",
 	"webhook":   "notifications-webhook",
+	"slack":     "notifications-slack",
 	"dlq":       "notifications-dlq",
 	"config":    "internal-config-reload",
 	"ingress":   "notifications-ingress",

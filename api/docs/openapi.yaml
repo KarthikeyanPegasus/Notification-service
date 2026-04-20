@@ -2,8 +2,13 @@ openapi: 3.0.3
 info:
   title: Notification Service API
   description: |
-    Comprehensive Notification-as-a-Service API for high-frequency multicahannel delivery.
-    Supports Email, SMS, Push, Webhooks, and WebSockets.
+    Comprehensive Notification-as-a-Service API for high-frequency multichannel delivery.
+    Supports Email, SMS, Push, Webhooks, WebSockets, and Slack (Incoming Webhook–style payloads).
+
+    **Slack:** use channel `slack`. Configure the Incoming Webhook URL in the App Store / vendor config
+    (`slack` / `webhook_url`). Set `recipient` to that webhook URL (or your deployment’s resolved address),
+    and send message text via `body`, a template, or `template_variables` keys `message` / `text`.
+    Async worker processing uses the Pub/Sub topic `notifications-slack`.
   version: 1.0.0
   contact:
     name: Spidey Deepmind Team
@@ -27,7 +32,7 @@ components:
   schemas:
     Channel:
       type: string
-      enum: [email, sms, push, websocket, webhook]
+      enum: [email, sms, push, websocket, webhook, slack]
     
     Priority:
       type: string
@@ -75,7 +80,12 @@ components:
 
     SendRequest:
       type: object
-      required: [idempotency_key, user_id, channels, type, recipient]
+      description: |
+        `recipient` is the channel-specific destination (email address, E.164 phone, device token, webhook URL, etc.)
+        when not implied by user preferences. It is optional when a template or `body` fully defines the payload
+        for your channel (e.g. some Slack setups). Plain-text or markdown content can be sent in `body` when not
+        using a template.
+      required: [idempotency_key, user_id, channels, type]
       properties:
         idempotency_key: { type: string, maxLength: 128 }
         user_id: { type: string, format: uuid }
@@ -83,6 +93,7 @@ components:
           type: array
           items: { $ref: '#/components/schemas/Channel' }
         type: { type: string, maxLength: 50 }
+        body: { type: string, description: Optional message body when not using a template. }
         template_id: { type: string, format: uuid }
         template_variables:
           type: object

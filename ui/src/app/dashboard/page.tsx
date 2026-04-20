@@ -21,7 +21,7 @@ import {
   Terminal,
 } from 'lucide-react'
 
-const CHANNELS: Channel[] = ['email', 'sms', 'push', 'websocket', 'webhook']
+const CHANNELS: Channel[] = ['email', 'sms', 'push', 'websocket', 'webhook', 'slack']
 
 export default function DashboardPage() {
   const now = new Date().toISOString()

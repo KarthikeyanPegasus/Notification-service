@@ -103,7 +103,7 @@ func main() {
 	smsSenders := provider.InitializeSMSSenders(cfg.Providers.SMS)
 	pushSenders := provider.InitializePushSenders(cfg.Providers.Push)
 	webhookDispatcher := provider.InitializeWebhookDispatcher(cfg.Providers.Webhook)
-
+	slackSender := provider.InitializeSlackSender(cfg.Providers.Slack)
 
 	// Services needed for activities
 	templateSvc := service.NewTemplateService(templateRepo, redisClient)
@@ -159,6 +159,8 @@ func main() {
 		worker.NewWebSocketWorker(subscriber, redisClient,
 			notifRepo, attemptRepo, eventRepo, cbRegistry, log),
 		worker.NewWebhookWorker(subscriber, webhookDispatcher,
+			notifRepo, attemptRepo, eventRepo, cbRegistry, log),
+		worker.NewSlackWorker(subscriber, slackSender,
 			notifRepo, attemptRepo, eventRepo, cbRegistry, log),
 		worker.NewEventWorker(subscriber, notifSvc, cfg.PubSub, log),
 	}

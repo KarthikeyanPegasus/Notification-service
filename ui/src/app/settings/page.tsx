@@ -11,13 +11,20 @@ import { getVendorConfigs, updateVendorConfig, VendorConfig } from '@/lib/api'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Mail, MessageSquare, Bell, Save, Loader2, ShieldCheck, AlertCircle, Database, Plus } from 'lucide-react'
+import { Mail, MessageSquare, Bell, Save, Loader2, ShieldCheck, AlertCircle, Database, Plus, Upload, FileJson, CheckCircle2, Slack } from 'lucide-react'
 import { cn } from '@/lib/utils'
+
+const SOCIAL_VENDORS: { id: string; title: string; description: string; field: 'webhook' | 'api_key' }[] = [
+  { id: 'slack', title: 'Slack', description: 'Incoming Webhook URL (used for Slack channel deliveries).', field: 'webhook' },
+  { id: 'discord', title: 'Discord', description: 'Discord channel webhook URL.', field: 'webhook' },
+  { id: 'teams', title: 'Microsoft Teams', description: 'Workflow or connector token / secret.', field: 'api_key' },
+  { id: 'telegram', title: 'Telegram', description: 'Bot token or API credential.', field: 'api_key' },
+]
 
 export default function SettingsPage() {
   const [configs, setConfigs] = useState<VendorConfig[]>([])
   const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState<'sms' | 'email' | 'push' | 'store'>('sms')
+  const [activeTab, setActiveTab] = useState<'sms' | 'email' | 'push' | 'social' | 'store'>('sms')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -63,6 +70,19 @@ export default function SettingsPage() {
     participants: ['fcm'] as Array<'fcm'>,
   })
 
+  type FcmConfig = {
+    server_key?: string
+    service_account?: Record<string, any> | null
+    [key: string]: any
+  }
+
+  const [fcmConfig, setFcmConfig] = useState<FcmConfig>({
+    server_key: '',
+    service_account: null,
+  })
+
+  const [socialConfigs, setSocialConfigs] = useState<Record<string, Record<string, any>>>({})
+
   useEffect(() => {
     loadConfigs()
   }, [])
@@ -87,6 +107,13 @@ export default function SettingsPage() {
         if (cfg.vendor_type === 'email_routing') setEmailRouting(prev => ({ ...prev, ...cfg.config_json }))
 
         if (cfg.vendor_type === 'push_routing') setPushRouting(prev => ({ ...prev, ...cfg.config_json }))
+        if (cfg.vendor_type === 'fcm') setFcmConfig(prev => ({ ...prev, ...cfg.config_json }))
+        if (SOCIAL_VENDORS.some((s) => s.id === cfg.vendor_type)) {
+          setSocialConfigs((prev) => ({
+            ...prev,
+            [cfg.vendor_type]: { ...(cfg.config_json as Record<string, any>) },
+          }))
+        }
       })
     } catch (err) {
       console.error(err)
@@ -94,6 +121,27 @@ export default function SettingsPage() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleFcmFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = async (event) => {
+      try {
+        const json = JSON.parse(event.target?.result as string)
+        const next = { ...fcmConfig, service_account: json }
+        setFcmConfig(next)
+        await handleSave('fcm', next)
+      } catch (err) {
+        setError('Invalid JSON file.')
+        setTimeout(() => setError(null), 3000)
+      } finally {
+        // allow re-uploading same file
+        e.target.value = ''
+      }
+    }
+    reader.readAsText(file)
   }
 
   const handleSave = async (type: string, config: any) => {
@@ -109,6 +157,18 @@ export default function SettingsPage() {
         setIsDialogOpen(false)
         setNewVendorType('')
         setNewVendorJson('{\n  \n}')
+      }
+      if (activeTab === 'social' && SOCIAL_VENDORS.some((s) => s.id === type)) {
+        const data = (await getVendorConfigs()) || []
+        setConfigs(data)
+        data.forEach((cfg) => {
+          if (SOCIAL_VENDORS.some((s) => s.id === cfg.vendor_type)) {
+            setSocialConfigs((prev) => ({
+              ...prev,
+              [cfg.vendor_type]: { ...(cfg.config_json as Record<string, any>) },
+            }))
+          }
+        })
       }
     } catch (err) {
       setError(`Failed to update ${type} settings.`)
@@ -184,6 +244,18 @@ export default function SettingsPage() {
           <div className="flex items-center gap-2">
             <Bell className="h-4 w-4" />
             Push Notifications
+          </div>
+        </button>
+        <button
+          onClick={() => setActiveTab('social')}
+          className={cn(
+            "pb-3 px-2 text-sm font-medium transition-colors border-b-2",
+            activeTab === 'social' ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <Slack className="h-4 w-4" />
+            Social
           </div>
         </button>
         <button
@@ -815,7 +887,68 @@ export default function SettingsPage() {
                   <CardDescription>Mobile push delivery via FCM.</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-sm text-muted-foreground">Dynamic configuration for FCM requires uploading a service account JSON. This feature is coming soon.</p>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium">FCM Provider</p>
+                      <p className="text-xs text-muted-foreground">
+                        {fcmConfig?.service_account
+                          ? 'Service account JSON is configured.'
+                          : fcmConfig?.server_key
+                            ? 'Legacy server key is configured.'
+                            : 'No credentials configured yet.'}
+                      </p>
+                    </div>
+                    {(fcmConfig?.service_account || fcmConfig?.server_key) ? (
+                      <Badge variant="secondary" className="bg-green-500/10 text-green-700 border-green-500/20 gap-1">
+                        <CheckCircle2 className="h-3 w-3" />
+                        Connected
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="gap-1">
+                        <AlertCircle className="h-3 w-3" />
+                        Not configured
+                      </Badge>
+                    )}
+                  </div>
+
+                  {fcmConfig?.service_account && (
+                    <div className="mt-4 rounded-lg border bg-muted/20 p-3">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase mb-2">Service Account</p>
+                      <div className="text-xs text-muted-foreground space-y-1">
+                        {fcmConfig.service_account.project_id && (
+                          <div className="flex items-center justify-between gap-2">
+                            <span>project_id</span>
+                            <span className="font-mono text-foreground">{String(fcmConfig.service_account.project_id)}</span>
+                          </div>
+                        )}
+                        {fcmConfig.service_account.client_email && (
+                          <div className="flex items-center justify-between gap-2">
+                            <span>client_email</span>
+                            <span className="font-mono text-foreground">{String(fcmConfig.service_account.client_email)}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className={cn(
+                    "relative mt-4 border-2 border-dashed rounded-lg p-5 flex flex-col items-center justify-center transition-colors text-center",
+                    fcmConfig?.service_account ? "border-green-500/50 bg-green-50/50" : "border-muted-foreground/20 hover:border-primary/50 hover:bg-primary/5"
+                  )}>
+                    <div className="mb-2 h-10 w-10 rounded-full bg-muted flex items-center justify-center">
+                      {fcmConfig?.service_account ? <FileJson className="h-5 w-5 text-green-600" /> : <Upload className="h-5 w-5 text-muted-foreground" />}
+                    </div>
+                    <p className="text-sm font-medium">
+                      {fcmConfig?.service_account ? "Replace service account JSON" : "Upload service_account.json"}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">Used for Firebase HTTP v1 API</p>
+                    <input
+                      type="file"
+                      accept=".json,application/json"
+                      className="absolute inset-0 opacity-0 cursor-pointer"
+                      onChange={handleFcmFileUpload}
+                    />
+                  </div>
                 </CardContent>
               </Card>
             )}
@@ -825,6 +958,84 @@ export default function SettingsPage() {
                  <AlertCircle className="h-8 w-8 text-muted-foreground/40 mb-3" />
                  <p className="text-sm text-muted-foreground font-medium">No Push providers connected.</p>
                  <Button variant="link" size="sm" className="mt-2" onClick={() => (window as any).location.href = '/app-store'}>Connect a provider in the App Store</Button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'social' && (
+          <div className="grid gap-6">
+            <Card className="border-muted-foreground/15 bg-muted/20">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">Social and apps</CardTitle>
+                <CardDescription>
+                  Manage credentials for chat and collaboration integrations. This section has no worker routing or delivery preferences—only stored configuration.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+
+            {SOCIAL_VENDORS.map((v) => {
+              const connected = configs.some((c) => c.vendor_type === v.id)
+              if (!connected) return null
+              const data = socialConfigs[v.id] || {}
+              return (
+                <Card key={v.id}>
+                  <CardHeader>
+                    <CardTitle className="text-lg">{v.title}</CardTitle>
+                    <CardDescription>{v.description}</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {v.field === 'webhook' ? (
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">Webhook URL</label>
+                        <Input
+                          value={String(data.webhook_url ?? '')}
+                          onChange={(e) =>
+                            setSocialConfigs((prev) => ({
+                              ...prev,
+                              [v.id]: { ...prev[v.id], webhook_url: e.target.value },
+                            }))
+                          }
+                          placeholder="https://..."
+                          className="font-mono text-sm"
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-muted-foreground uppercase">API key / token</label>
+                        <Input
+                          type="password"
+                          value={String(data.api_key ?? '')}
+                          onChange={(e) =>
+                            setSocialConfigs((prev) => ({
+                              ...prev,
+                              [v.id]: { ...prev[v.id], api_key: e.target.value },
+                            }))
+                          }
+                          placeholder="••••••••"
+                          className="font-mono text-sm"
+                        />
+                      </div>
+                    )}
+                  </CardContent>
+                  <CardFooter className="bg-muted/50 py-3 flex justify-between">
+                    <p className="text-xs text-muted-foreground italic">Overrides are persisted per vendor in the config store.</p>
+                    <Button disabled={saving} onClick={() => handleSave(v.id, socialConfigs[v.id] || {})}>
+                      {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
+                      Save
+                    </Button>
+                  </CardFooter>
+                </Card>
+              )
+            })}
+
+            {!SOCIAL_VENDORS.some((v) => configs.some((c) => c.vendor_type === v.id)) && (
+              <div className="flex flex-col items-center justify-center py-20 bg-muted/20 border border-dashed rounded-xl">
+                <AlertCircle className="h-8 w-8 text-muted-foreground/40 mb-3" />
+                <p className="text-sm text-muted-foreground font-medium">No social providers connected.</p>
+                <Button variant="link" size="sm" className="mt-2" onClick={() => ((window as any).location.href = '/app-store')}>
+                  Connect a provider in the App Store
+                </Button>
               </div>
             )}
           </div>

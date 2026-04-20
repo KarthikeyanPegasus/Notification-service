@@ -5,6 +5,7 @@ import {
   MessageSquare, 
   Smartphone, 
   Globe, 
+  Slack,
   MoreVertical, 
   Edit2, 
   Trash2,
@@ -35,6 +36,7 @@ const ChannelIcon = ({ channel }: { channel: string }) => {
     case 'sms': return <MessageSquare className="h-4 w-4 text-green-500" />
     case 'push': return <Smartphone className="h-4 w-4 text-purple-500" />
     case 'webhook': return <Globe className="h-4 w-4 text-orange-500" />
+    case 'slack': return <Slack className="h-4 w-4 text-violet-500" />
     default: return <Mail className="h-4 w-4" />
   }
 }
