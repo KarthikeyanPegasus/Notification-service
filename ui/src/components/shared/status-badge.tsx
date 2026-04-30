@@ -8,16 +8,19 @@ interface StatusBadgeProps {
 }
 
 const statusConfig: Record<Status, { label: string; variant: 'success' | 'info' | 'warning' | 'destructive' | 'muted' }> = {
-  DELIVERED: { label: 'Delivered', variant: 'success' },
-  SENT:      { label: 'Sent',      variant: 'info' },
-  QUEUED:    { label: 'Queued',    variant: 'info' },
-  PENDING:   { label: 'Pending',   variant: 'warning' },
-  FAILED:    { label: 'Failed',    variant: 'destructive' },
-  CANCELLED: { label: 'Cancelled', variant: 'muted' },
+  delivered: { label: 'Delivered', variant: 'success' },
+  sent: { label: 'Sent', variant: 'info' },
+  queued: { label: 'Queued', variant: 'warning' },
+  pending: { label: 'Pending', variant: 'warning' },
+  failed: { label: 'Failed', variant: 'destructive' },
+  cancelled: { label: 'Cancelled', variant: 'muted' },
+  bounced: { label: 'Bounced', variant: 'muted' },
+  suppressed: { label: 'Suppressed', variant: 'muted' },
 }
 
 export function StatusBadge({ status, className }: StatusBadgeProps) {
-  const config = statusConfig[status] ?? { label: status, variant: 'muted' as const }
+  const normalized = String(status ?? '').toLowerCase() as Status
+  const config = statusConfig[normalized] ?? { label: normalized || 'unknown', variant: 'muted' as const }
   return (
     <Badge variant={config.variant} className={cn(className)}>
       {config.label}

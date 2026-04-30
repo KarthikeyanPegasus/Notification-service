@@ -62,13 +62,15 @@ func (s *TemplateService) Render(tmpl *domain.NotificationTemplate, vars map[str
 	return content, nil
 }
 
-// RenderForChannel resolves template by ID (if given) or builds ad-hoc content.
+// RenderForChannel resolves template by ID (if given) or builds content from direct input.
 func (s *TemplateService) RenderForChannel(
 	ctx context.Context,
 	templateID *uuid.UUID,
 	channel domain.Channel,
 	vars map[string]string,
-	fallbackBody string,
+	body string,
+	subject string,
+	html string,
 ) (*domain.RenderedContent, error) {
 	if templateID != nil {
 		tmpl, err := s.GetByID(ctx, *templateID)
@@ -78,13 +80,18 @@ func (s *TemplateService) RenderForChannel(
 		return s.Render(tmpl, vars)
 	}
 
-	// No template — use fallback body with variable substitution
+	// No template — use provided content with variable substitution
 	rendered := &domain.RenderedContent{
-		Body: s.RenderString(fallbackBody, vars),
+		Subject: s.RenderString(subject, vars),
+		Body:    s.RenderString(body, vars),
+		HTML:    s.RenderString(html, vars),
+		Data:    vars,
 	}
-	if channel == domain.ChannelEmail {
-		rendered.HTML = buildEmailHTML("", rendered.Body)
+
+	if channel == domain.ChannelEmail && rendered.HTML == "" {
+		rendered.HTML = buildEmailHTML(rendered.Subject, rendered.Body)
 	}
+
 	return rendered, nil
 }
 

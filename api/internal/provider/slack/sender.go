@@ -38,9 +38,20 @@ func NewSender(cfg config.SlackProviderConfig) *Sender {
 func (s *Sender) ProviderName() string { return "slack" }
 
 func (s *Sender) resolveWebhookURL(n *domain.Notification) string {
+	recipient := ""
 	if n != nil {
-		if u := strings.TrimSpace(n.Recipient); u != "" {
-			return u
+		recipient = strings.TrimSpace(n.Recipient)
+		if recipient != "" {
+			// Back-compat: some callers pass the raw webhook URL as recipient.
+			if strings.HasPrefix(recipient, "http://") || strings.HasPrefix(recipient, "https://") || strings.Contains(recipient, "hooks.slack.com") {
+				return recipient
+			}
+			// Otherwise interpret recipient as a configured channel name.
+			for _, ch := range s.cfg.Channels {
+				if strings.EqualFold(strings.TrimSpace(ch.ChannelName), recipient) {
+					return strings.TrimSpace(ch.WebhookURL)
+				}
+			}
 		}
 	}
 	return strings.TrimSpace(s.cfg.WebhookURL)

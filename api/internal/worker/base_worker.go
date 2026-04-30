@@ -11,20 +11,72 @@ import (
 	"github.com/spidey/notification-service/internal/domain"
 	"github.com/spidey/notification-service/internal/provider"
 	"github.com/spidey/notification-service/internal/pubsub"
+	"github.com/spidey/notification-service/internal/ratelimit"
 	"github.com/spidey/notification-service/internal/repository"
 	"go.uber.org/zap"
 )
 
+// suppressionCheckTimeout is the max time for a governance DB lookup per message.
+const suppressionCheckTimeout = 5 * time.Second
+
+// prioritySLA defines the maximum end-to-end delivery time per priority level.
+// Workers enforce this as a context deadline from the moment a message is received.
+var prioritySLA = map[domain.Priority]time.Duration{
+	domain.PriorityHigh:   5 * time.Second,
+	domain.PriorityMedium: 15 * time.Second,
+	domain.PriorityLow:    30 * time.Second,
+}
+
+// shouldPreferFallback returns true when the primary/preferred vendor has an error rate above the configured threshold.
+// It uses the circuit breaker's rolling window counts (see circuit.BreakerConfig.Interval).
+func shouldPreferFallback(registry *circuit.Registry, primaryVendor string, routing nsconfig.RoutingConfig) bool {
+	if registry == nil {
+		return false
+	}
+	if routing.ErrorRateThreshold <= 0 {
+		return false
+	}
+	if primaryVendor == "" {
+		return false
+	}
+	minReq := routing.MinRequests
+	if minReq <= 0 {
+		minReq = 20
+	}
+
+	cb := registry.GetOrDefault(primaryVendor)
+	counts := cb.Counts()
+	total := int(counts.TotalSuccesses + counts.TotalFailures)
+	if total < minReq {
+		return false
+	}
+	if counts.TotalFailures == 0 {
+		return false
+	}
+	errRate := float64(counts.TotalFailures) / float64(total)
+	return errRate >= routing.ErrorRateThreshold
+}
+
 // BaseWorker contains the shared logic for all channel workers.
 type BaseWorker struct {
-	channel     domain.Channel
+	channel      domain.Channel
+	priority     domain.Priority // the priority this worker instance handles
 	subscription string
-	subscriber  pubsub.Subscriber
-	notifRepo   *repository.NotificationRepository
-	attemptRepo *repository.AttemptRepository
-	eventRepo   *repository.EventRepository
-	registry    *circuit.Registry
-	log         *zap.Logger
+	subscriber   pubsub.Subscriber
+	notifRepo    *repository.NotificationRepository
+	attemptRepo  *repository.AttemptRepository
+	eventRepo    *repository.EventRepository
+	govRepo      *repository.GovernanceRepository
+	vendorRepo   nsconfig.Repository
+	rateLimitRepo repository.VendorRateLimitRepository
+	rateLimiter  *ratelimit.VendorLimiter
+	cfg          *nsconfig.Config
+	registry     *circuit.Registry
+	log          *zap.Logger
+	// vendorFilter, when set, restricts this worker to a specific vendor.
+	vendorFilter string
+	// clientIDFilter, when set, restricts this worker to a specific client's scope.
+	clientIDFilter string
 }
 
 // Worker is the interface all channel workers implement.
@@ -34,6 +86,21 @@ type Worker interface {
 	Reload(ctx context.Context, cfg nsconfig.ProviderConfig)
 }
 
+// WorkerOptions carries optional configuration for a worker instance.
+type WorkerOptions struct {
+	// Priority restricts this worker to a single priority tier (high/medium/low).
+	// When empty, the worker defaults to consuming all priorities (legacy mode).
+	Priority domain.Priority
+	// VendorFilter restricts this worker to a specific vendor name.
+	VendorFilter string
+	// ClientIDFilter scopes this worker to a specific API key / client.
+	ClientIDFilter string
+	// RateLimitRepo enables vendor-level rate limit enforcement.
+	RateLimitRepo repository.VendorRateLimitRepository
+	// RateLimiter is the Redis-backed rate limiter used by the worker.
+	RateLimiter *ratelimit.VendorLimiter
+}
+
 func newBaseWorker(
 	channel domain.Channel,
 	subscription string,
@@ -41,19 +108,156 @@ func newBaseWorker(
 	notifRepo *repository.NotificationRepository,
 	attemptRepo *repository.AttemptRepository,
 	eventRepo *repository.EventRepository,
+	govRepo *repository.GovernanceRepository,
+	vendorRepo nsconfig.Repository,
+	cfg *nsconfig.Config,
 	registry *circuit.Registry,
 	log *zap.Logger,
+	opts ...WorkerOptions,
 ) *BaseWorker {
-	return &BaseWorker{
+	bw := &BaseWorker{
 		channel:      channel,
 		subscription: subscription,
 		subscriber:   subscriber,
 		notifRepo:    notifRepo,
 		attemptRepo:  attemptRepo,
 		eventRepo:    eventRepo,
+		govRepo:      govRepo,
+		vendorRepo:   vendorRepo,
+		cfg:          cfg,
 		registry:     registry,
 		log:          log,
 	}
+	if len(opts) > 0 {
+		o := opts[0]
+		bw.priority = o.Priority
+		bw.vendorFilter = o.VendorFilter
+		bw.clientIDFilter = o.ClientIDFilter
+		bw.rateLimitRepo = o.RateLimitRepo
+		bw.rateLimiter = o.RateLimiter
+	}
+	return bw
+}
+
+// slaContext wraps ctx with a deadline derived from the message priority.
+// High-priority messages must be delivered within 5s, medium within 15s, low within 30s.
+func (w *BaseWorker) slaContext(ctx context.Context, priority domain.Priority) (context.Context, context.CancelFunc) {
+	sla, ok := prioritySLA[priority]
+	if !ok || sla <= 0 {
+		sla = prioritySLA[domain.PriorityLow]
+	}
+	return context.WithTimeout(ctx, sla)
+}
+
+// checkVendorRateLimit returns true if the send should proceed, false if the vendor
+// is currently rate-limited. When throttled, the message should be nacked so it can
+// be redelivered after the rate window resets.
+func (w *BaseWorker) checkVendorRateLimit(ctx context.Context, vendorName string, apiKeyID *uuid.UUID) bool {
+	if w.rateLimiter == nil || w.rateLimitRepo == nil {
+		return true
+	}
+
+	var clientIDStr string
+	if apiKeyID != nil {
+		clientIDStr = apiKeyID.String()
+	}
+
+	// Prefer scoped limit; fall back to global.
+	rl, err := w.rateLimitRepo.Get(ctx, vendorName, &clientIDStr)
+	if err != nil || rl == nil {
+		if err != nil {
+			w.log.Warn("failed to load rate limit config — allowing send",
+				zap.String("vendor", vendorName), zap.Error(err))
+		}
+		// No scoped config; try global
+		rl, err = w.rateLimitRepo.Get(ctx, vendorName, nil)
+		if err != nil || rl == nil {
+			return true
+		}
+	}
+
+	allowed, err := w.rateLimiter.Allow(ctx, vendorName, clientIDStr, rl)
+	if err != nil {
+		w.log.Warn("rate limiter error — allowing send", zap.String("vendor", vendorName), zap.Error(err))
+		return true
+	}
+	return allowed
+}
+
+// checkGovernance returns true if the notification should be suppressed.
+// It checks the identifier-level suppression list and the user-level opt-out table.
+// When suppressed it updates the notification status to StatusSuppressed and appends an event.
+func (w *BaseWorker) checkGovernance(ctx context.Context, n *domain.Notification) bool {
+	if w.govRepo == nil {
+		return false
+	}
+
+	checkCtx, cancel := context.WithTimeout(ctx, suppressionCheckTimeout)
+	defer cancel()
+
+	// Identifier-level suppression
+	if stype := domain.SuppressionTypeForChannel(w.channel); stype != "" {
+		suppressed, err := w.govRepo.IsSuppressed(checkCtx, stype, n.Recipient)
+		if err != nil {
+			w.log.Warn("suppression check error — allowing delivery",
+				zap.String("notification_id", n.ID.String()),
+				zap.Error(err),
+			)
+		} else if suppressed {
+			w.log.Info("notification suppressed (identifier)",
+				zap.String("notification_id", n.ID.String()),
+				zap.String("channel", string(w.channel)),
+				zap.String("recipient", n.Recipient),
+			)
+			_ = w.notifRepo.UpdateStatus(ctx, n.ID, domain.StatusSuppressed)
+			_ = w.eventRepo.Append(ctx, &domain.NotificationEvent{
+				ID:             uuid.New(),
+				NotificationID: n.ID,
+				EventType:      domain.EventSuppressed,
+				Metadata:       map[string]any{"reason": "identifier_suppressed", "channel": string(w.channel)},
+				CreatedAt:      time.Now(),
+			})
+			return true
+		}
+	}
+
+	// User-level opt-out
+	if n.UserID != nil {
+		optedOut, err := w.govRepo.IsOptedOut(checkCtx, *n.UserID, w.channel)
+		if err != nil {
+			w.log.Warn("opt-out check error — allowing delivery",
+				zap.String("notification_id", n.ID.String()),
+				zap.Error(err),
+			)
+		} else if optedOut {
+			w.log.Info("notification suppressed (opt-out)",
+				zap.String("notification_id", n.ID.String()),
+				zap.String("channel", string(w.channel)),
+				zap.String("user_id", n.UserID.String()),
+			)
+			_ = w.notifRepo.UpdateStatus(ctx, n.ID, domain.StatusSuppressed)
+			_ = w.eventRepo.Append(ctx, &domain.NotificationEvent{
+				ID:             uuid.New(),
+				NotificationID: n.ID,
+				EventType:      domain.EventOptedOut,
+				Metadata:       map[string]any{"reason": "user_opt_out", "channel": string(w.channel)},
+				CreatedAt:      time.Now(),
+			})
+			return true
+		}
+	}
+
+	return false
+}
+
+func (w *BaseWorker) getEffectiveConfig(ctx context.Context, apiKeyID *uuid.UUID) *nsconfig.Config {
+	if apiKeyID == nil || w.vendorRepo == nil || w.cfg == nil {
+		return w.cfg
+	}
+	scope := apiKeyID.String()
+	cfgCopy := *w.cfg
+	_ = cfgCopy.LoadDynamicOverridesScoped(ctx, w.vendorRepo, &scope)
+	return &cfgCopy
 }
 
 // dispatch executes the send using a provider, records the attempt, and acks/nacks.
@@ -75,6 +279,20 @@ func (w *BaseWorker) dispatch(
 		return nil
 	}
 
+	// Governance check: suppress before delivery (non-Temporal path)
+	if w.checkGovernance(ctx, n) {
+		return nil // ack — suppressed notifications should not be retried
+	}
+
+	// Enforce priority SLA: wrap context with a deadline based on priority.
+	slaCtx, slaCancel := w.slaContext(ctx, n.Priority)
+	defer slaCancel()
+
+	// Vendor rate limit check — nack if throttled so the message is redelivered.
+	if !w.checkVendorRateLimit(slaCtx, vendorName, n.APIKeyID) {
+		return fmt.Errorf("vendor %s rate limited — nacking for redelivery", vendorName)
+	}
+
 	// Check circuit breaker
 	cb := w.registry.GetOrDefault(vendorName)
 	if cb.IsOpen() {
@@ -84,6 +302,8 @@ func (w *BaseWorker) dispatch(
 		)
 		return fmt.Errorf("circuit breaker open for vendor %s", vendorName)
 	}
+
+	ctx = slaCtx // use SLA-bounded context for the actual send
 
 	// Attempt the send
 	attemptNum := 1
@@ -97,6 +317,10 @@ func (w *BaseWorker) dispatch(
 	})
 
 	result.LatencyMs = int(time.Since(start).Milliseconds())
+	if result.Provider == "" {
+		// Ensure attempt records carry the actual vendor used, so status polling uses the right provider.
+		result.Provider = vendorName
+	}
 
 	if execErr != nil {
 		result.Success = false
@@ -128,21 +352,6 @@ func (w *BaseWorker) dispatch(
 		CreatedAt: time.Now(),
 	})
 
-	// Prometheus metrics
-	statusStr := "failed"
-	if result.Success {
-		statusStr = "sent"
-	}
-	NotificationsProcessedTotal.WithLabelValues(
-		string(w.channel),
-		statusStr,
-		vendorName,
-	).Inc()
-	NotificationProcessingDurationSeconds.WithLabelValues(
-		string(w.channel),
-		vendorName,
-	).Observe(time.Since(start).Seconds())
-
 	w.log.Info("notification dispatched",
 		zap.String("channel", string(w.channel)),
 		zap.String("notification_id", notifID.String()),
@@ -170,6 +379,11 @@ func (w *BaseWorker) dispatchPublishAll(
 	n, err := w.notifRepo.GetByID(ctx, notifID)
 	if err != nil {
 		w.log.Error("notification not found", zap.String("id", msg.NotificationID), zap.Error(err))
+		return nil
+	}
+
+	// Governance check: suppress before delivery (non-Temporal path)
+	if w.checkGovernance(ctx, n) {
 		return nil
 	}
 

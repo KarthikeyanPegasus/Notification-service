@@ -25,7 +25,8 @@ import { NotificationFiltersBar } from './notification-filters'
 import { TableSkeleton } from '@/components/shared/loading-skeleton'
 import { EmptyState } from '@/components/shared/empty-state'
 import { ErrorState } from '@/components/shared/error-state'
-import { getNotifications } from '@/lib/api'
+import { getNotificationsScoped } from '@/lib/api'
+import type { ApiClientKey } from '@/lib/api'
 import type { Notification, NotificationFilters } from '@/types'
 import { formatDate, truncateId } from '@/lib/utils'
 import { ChevronLeft, ChevronRight, ExternalLink, Bell } from 'lucide-react'
@@ -37,7 +38,13 @@ const priorityVariants: Record<string, 'default' | 'secondary' | 'warning' | 'de
   critical: 'destructive',
 }
 
-export function NotificationsTable() {
+export function NotificationsTable({
+  apiKeyId,
+  clients,
+}: {
+  apiKeyId?: string
+  clients?: ApiClientKey[]
+}) {
   const router = useRouter()
   const [filters, setFilters] = useState<NotificationFilters>({
     page: 1,
@@ -45,8 +52,8 @@ export function NotificationsTable() {
   })
 
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['notifications', filters],
-    queryFn: () => getNotifications(filters),
+    queryKey: ['notifications', filters, apiKeyId ?? 'global'],
+    queryFn: () => getNotificationsScoped(filters, apiKeyId),
     retry: 1,
   })
 
@@ -54,24 +61,41 @@ export function NotificationsTable() {
   const total = data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / (filters.page_size ?? 20)))
   const currentPage = filters.page ?? 1
+  const clientLabel = (n: Notification) => {
+    if (n.client_name) return n.client_name
+    const id = (n as any).api_key_id as string | undefined
+    if (!id) return '—'
+    const match = clients?.find((c) => c.id === id)
+    if (match) return `${match.name} (${match.prefix})`
+    return truncateId(id, 10)
+  }
+
+  const destinationLabel = (n: Notification) => {
+    const to = String((n as any).recipient ?? '').trim()
+    if (!to) return truncateId(n.id, 12)
+    if (n.channel === 'slack') {
+      if (to.includes('hooks.slack.com')) return 'slack-webhook'
+      return to // channel name
+    }
+    return to
+  }
 
   const columns = useMemo<ColumnDef<Notification>[]>(
     () => [
       {
-        accessorKey: 'id',
-        header: 'ID',
+        id: 'destination',
+        header: 'To',
         cell: ({ row }) => (
-          <span className="font-mono text-xs text-muted-foreground">
-            {truncateId(row.original.id, 12)}
-          </span>
+          <div className="min-w-0">
+            <div className="text-sm font-medium truncate">{destinationLabel(row.original)}</div>
+            <div className="text-xs text-muted-foreground font-mono truncate">{truncateId(row.original.id, 12)}</div>
+          </div>
         ),
       },
       {
-        accessorKey: 'user_id',
-        header: 'User',
-        cell: ({ row }) => (
-          <span className="text-sm font-medium">{truncateId(row.original.user_id, 10)}</span>
-        ),
+        id: 'client',
+        header: 'Client',
+        cell: ({ row }) => <span className="text-sm font-medium">{clientLabel(row.original)}</span>,
       },
       {
         accessorKey: 'channel',
@@ -99,9 +123,12 @@ export function NotificationsTable() {
       },
       {
         accessorKey: 'provider',
-        header: 'Provider',
+        header: 'Vendor',
         cell: ({ row }) => (
-          <span className="text-sm text-muted-foreground">{row.original.provider ?? '—'}</span>
+          <div className="min-w-0">
+            <div className="text-sm text-muted-foreground truncate">{row.original.provider ?? '—'}</div>
+            <div className="text-xs text-muted-foreground truncate">{(row.original as any).source ?? ''}</div>
+          </div>
         ),
       },
       {

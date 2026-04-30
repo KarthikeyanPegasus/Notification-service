@@ -1,7 +1,7 @@
 'use client'
 
 import { useQuery } from '@tanstack/react-query'
-import { getNotifications } from '@/lib/api'
+import { getNotificationsScoped } from '@/lib/api'
 import { StatusBadge } from '@/components/shared/status-badge'
 import { ChannelIcon } from '@/components/shared/channel-icon'
 import { formatRelativeTime, truncateId } from '@/lib/utils'
@@ -10,10 +10,10 @@ import { ErrorState } from '@/components/shared/error-state'
 import Link from 'next/link'
 import { RefreshCw } from 'lucide-react'
 
-export function LiveFeed() {
+export function LiveFeed({ apiKeyId }: { apiKeyId?: string }) {
   const { data, isLoading, isError, refetch, dataUpdatedAt } = useQuery({
-    queryKey: ['dashboard-feed'],
-    queryFn: () => getNotifications({ page: 1, page_size: 10 }),
+    queryKey: ['dashboard-feed', apiKeyId ?? 'global'],
+    queryFn: () => getNotificationsScoped({ page: 1, page_size: 10 } as any, apiKeyId),
     refetchInterval: 30000,
     retry: 1,
   })

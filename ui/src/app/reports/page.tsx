@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { PageHeader } from '@/components/shared/page-header'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -10,7 +10,7 @@ import { LatencyChart } from '@/components/reports/latency-chart'
 import { ProviderErrorsChart } from '@/components/reports/provider-errors-chart'
 import { ChartSkeleton } from '@/components/shared/loading-skeleton'
 import { ErrorState } from '@/components/shared/error-state'
-import { getReports } from '@/lib/api'
+import { getReportsScoped } from '@/lib/api'
 import { getDaysAgo, formatPercent, formatNumber, formatLatency } from '@/lib/utils'
 import {
   Table,
@@ -21,30 +21,59 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
+import { ClientScopeSelect } from '@/components/shared/client-scope-select'
 
 type DateRange = 7 | 30 | 90
 
 export default function ReportsPage() {
   const [range, setRange] = useState<DateRange>(7)
+  const [apiKeyId, setApiKeyId] = useState<string | undefined>(undefined)
 
   const now = new Date().toISOString()
   const from = getDaysAgo(range)
 
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['reports', range],
-    queryFn: () => getReports({ date_from: from, date_to: now }),
+    queryKey: ['reports', range, apiKeyId ?? 'global'],
+    queryFn: () => getReportsScoped({ date_from: from, date_to: now }, apiKeyId),
     retry: 1,
   })
 
   const reports = data ?? []
 
-  // Aggregate totals per channel (latest entry per channel)
-  const channelMap = new Map<string, any>()
-  reports.forEach((r) => {
-    const existing = channelMap.get(r.channel)
-    if (!existing || r.date > existing.date) channelMap.set(r.channel, r)
-  })
-  const summary = Array.from(channelMap.values())
+  // Aggregate totals per channel across the entire range
+  const summary = useMemo(() => {
+    const channelMap = new Map<string, any>()
+    reports.forEach((r) => {
+      const existing = channelMap.get(r.channel) || {
+        channel: r.channel,
+        total: 0,
+        sent: 0,
+        delivered: 0,
+        failed: 0,
+        bounced: 0,
+        p50_latency_ms: 0,
+        p95_latency_ms: 0,
+        count: 0,
+      }
+      existing.total += r.total
+      existing.sent += r.sent
+      existing.delivered += r.delivered
+      existing.failed += r.failed
+      existing.bounced += r.bounced
+      // Weighted average or simply avg for latency for now
+      existing.p50_latency_ms += r.p50_latency_ms
+      existing.p95_latency_ms += r.p95_latency_ms
+      existing.count += 1
+      channelMap.set(r.channel, existing)
+    })
+
+    return Array.from(channelMap.values()).map(s => ({
+      ...s,
+      success_rate: s.total > 0 ? (s.delivered + s.sent) / s.total : 0,
+      p50_latency_ms: s.count > 0 ? s.p50_latency_ms / s.count : 0,
+      p95_latency_ms: s.count > 0 ? s.p95_latency_ms / s.count : 0,
+    }))
+  }, [reports])
 
   return (
     <div className="space-y-8">
@@ -53,21 +82,24 @@ export default function ReportsPage() {
         description="Delivery metrics, latency, and error analytics"
         breadcrumbs={[{ label: 'Dashboard', href: '/dashboard' }, { label: 'Reports' }]}
         actions={
-          <div className="flex rounded-md border overflow-hidden">
-            {([7, 30, 90] as DateRange[]).map((d) => (
-              <button
-                key={d}
-                onClick={() => setRange(d)}
-                className={cn(
-                  'px-3 py-1.5 text-sm font-medium transition-colors',
-                  range === d
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-background hover:bg-accent text-foreground',
-                )}
-              >
-                {d}d
-              </button>
-            ))}
+          <div className="flex flex-col gap-2 md:flex-row md:items-center">
+            <ClientScopeSelect className="w-full md:w-72" includeAll onScopeChange={setApiKeyId} />
+            <div className="flex rounded-md border overflow-hidden">
+              {([7, 30, 90] as DateRange[]).map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setRange(d)}
+                  className={cn(
+                    'px-3 py-1.5 text-sm font-medium transition-colors',
+                    range === d
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-background hover:bg-accent text-foreground',
+                  )}
+                >
+                  {d}d
+                </button>
+              ))}
+            </div>
           </div>
         }
       />

@@ -13,10 +13,11 @@ import (
 const defaultBaseURL = "http://localhost:8080/v1"
 
 type Client struct {
-	baseURL     string
-	httpClient  *http.Client
-	bearerToken string
+	baseURL      string
+	httpClient   *http.Client
+	bearerToken  string
 	serviceToken string
+	apiKey       string
 
 	Notifications *NotificationsService
 	OTP           *OTPService
@@ -40,6 +41,11 @@ func WithBearerToken(token string) ClientOption {
 
 func WithServiceToken(token string) ClientOption {
 	return func(c *Client) { c.serviceToken = token }
+}
+
+// WithAPIKey sets X-API-Key header for requests.
+func WithAPIKey(apiKey string) ClientOption {
+	return func(c *Client) { c.apiKey = apiKey }
 }
 
 func New(opts ...ClientOption) *Client {
@@ -81,6 +87,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	if c.serviceToken != "" {
 		req.Header.Set("X-Service-Token", c.serviceToken)
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
 	}
 
 	resp, err := c.httpClient.Do(req)

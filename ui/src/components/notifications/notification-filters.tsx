@@ -10,15 +10,17 @@ import { ChannelIcon, channelLabel } from '@/components/shared/channel-icon'
 import { cn } from '@/lib/utils'
 
 const CHANNELS: Channel[] = ['email', 'sms', 'push', 'websocket', 'webhook', 'slack']
-const STATUSES: Status[] = ['PENDING', 'QUEUED', 'SENT', 'DELIVERED', 'FAILED', 'CANCELLED']
+const STATUSES: Status[] = ['pending', 'queued', 'sent', 'delivered', 'failed', 'cancelled', 'bounced', 'suppressed']
 
 const statusColors: Record<Status, string> = {
-  PENDING:   'bg-yellow-100 text-yellow-800 border-yellow-200',
-  QUEUED:    'bg-blue-100 text-blue-800 border-blue-200',
-  SENT:      'bg-blue-100 text-blue-800 border-blue-200',
-  DELIVERED: 'bg-green-100 text-green-800 border-green-200',
-  FAILED:    'bg-red-100 text-red-800 border-red-200',
-  CANCELLED: 'bg-slate-100 text-slate-600 border-slate-200',
+  pending: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+  queued: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+  sent: 'bg-blue-100 text-blue-800 border-blue-200',
+  delivered: 'bg-green-100 text-green-800 border-green-200',
+  failed: 'bg-red-100 text-red-800 border-red-200',
+  cancelled: 'bg-slate-100 text-slate-600 border-slate-200',
+  bounced: 'bg-slate-100 text-slate-600 border-slate-200',
+  suppressed: 'bg-slate-100 text-slate-600 border-slate-200',
 }
 
 interface NotificationFiltersProps {
@@ -61,26 +63,28 @@ export function NotificationFiltersBar({ filters, onChange }: NotificationFilter
 
   return (
     <div className="space-y-3">
-      {/* Search bar */}
+      {/* Search row */}
       <div className="flex gap-2">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Search by notification ID or user ID..."
+            placeholder="Search by ID, recipient, or idempotency key..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSearchCommit()}
             className="pl-9"
           />
         </div>
-        <Button onClick={handleSearchCommit} variant="outline">
-          Search
-        </Button>
-        {hasFilters && (
-          <Button onClick={clearAll} variant="ghost" size="icon" title="Clear filters">
-            <X className="h-4 w-4" />
+        <div className="flex gap-2">
+          <Button onClick={handleSearchCommit} variant="outline">
+            Search
           </Button>
-        )}
+          {hasFilters && (
+            <Button onClick={clearAll} variant="ghost" size="icon" title="Clear filters">
+              <X className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Channel filter */}
@@ -120,7 +124,7 @@ export function NotificationFiltersBar({ filters, onChange }: NotificationFilter
                 active ? `${statusColors[s]} ring-1 ring-offset-1 ring-current` : 'bg-background hover:bg-accent border-border',
               )}
             >
-              {s}
+              {String(s).toUpperCase()}
             </button>
           )
         })}

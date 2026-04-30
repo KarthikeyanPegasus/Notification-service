@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS user_api_keys;
+DROP TABLE IF EXISTS users;
+

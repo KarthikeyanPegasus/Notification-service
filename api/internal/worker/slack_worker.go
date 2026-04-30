@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/spidey/notification-service/internal/circuit"
@@ -27,13 +28,22 @@ func NewSlackWorker(
 	notifRepo *repository.NotificationRepository,
 	attemptRepo *repository.AttemptRepository,
 	eventRepo *repository.EventRepository,
+	govRepo *repository.GovernanceRepository,
+	vendorRepo nsconfig.Repository,
+	cfg *nsconfig.Config,
 	registry *circuit.Registry,
 	log *zap.Logger,
+	opts ...WorkerOptions,
 ) *SlackWorker {
+	priority := domain.PriorityLow
+	if len(opts) > 0 && opts[0].Priority != "" {
+		priority = opts[0].Priority
+	}
+	subKey := pubsub.PriorityTopicKey(string(domain.ChannelSlack), string(priority))
 	return &SlackWorker{
 		base: newBaseWorker(
-			domain.ChannelSlack, "slack-worker-sub",
-			subscriber, notifRepo, attemptRepo, eventRepo, registry, log,
+			domain.ChannelSlack, subKey,
+			subscriber, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
 		),
 		sender: sender,
 	}
@@ -42,12 +52,26 @@ func NewSlackWorker(
 func (w *SlackWorker) Channel() domain.Channel { return domain.ChannelSlack }
 
 func (w *SlackWorker) Start(ctx context.Context) error {
-	w.base.log.Info("slack worker started")
-	return w.base.subscriber.Subscribe(ctx, "slack", func(ctx context.Context, msg *pubsub.Message) error {
+	w.base.log.Info("slack worker started",
+		zap.String("priority", string(w.base.priority)),
+		zap.String("subscription", w.base.subscription),
+	)
+	return w.base.subscriber.Subscribe(ctx, w.base.subscription, func(ctx context.Context, msg *pubsub.Message) error {
 		return w.base.dispatch(ctx, msg, func(ctx context.Context, n *domain.Notification) (domain.DeliveryResult, error) {
+			effectiveCfg := w.base.getEffectiveConfig(ctx, n.APIKeyID)
+			
 			w.mu.RLock()
 			snd := w.sender
 			w.mu.RUnlock()
+
+			// If we have a scoped config, use it to initialize sender
+			if effectiveCfg != w.base.cfg {
+				snd = provider.InitializeSlackSender(effectiveCfg.Providers.Slack)
+			}
+
+			if snd == nil {
+				return domain.DeliveryResult{}, fmt.Errorf("slack vendor not configured")
+			}
 			return snd.Send(ctx, n)
 		}, "slack")
 	})

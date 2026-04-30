@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getScheduled, cancelScheduled } from '@/lib/api'
+import { getScheduled, cancelScheduled, listMyClients, type ApiClientKey } from '@/lib/api'
 import type { ScheduledNotification } from '@/types'
 import {
   Table,
@@ -35,6 +35,18 @@ export function ScheduledTable() {
   const [page, setPage] = useState(1)
   const [cancelTarget, setCancelTarget] = useState<ScheduledNotification | null>(null)
   const [rescheduleTarget, setRescheduleTarget] = useState<ScheduledNotification | null>(null)
+  const [cancelError, setCancelError] = useState<string | null>(null)
+  const [clientMap, setClientMap] = useState<Record<string, ApiClientKey>>({})
+
+  useEffect(() => {
+    listMyClients()
+      .then((ks) => {
+        const m: Record<string, ApiClientKey> = {}
+        for (const k of ks ?? []) m[k.id] = k
+        setClientMap(m)
+      })
+      .catch(console.error)
+  }, [])
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['scheduled', page],
@@ -48,8 +60,15 @@ export function ScheduledTable() {
 
   const cancelMutation = useMutation({
     mutationFn: (id: string) => cancelScheduled(id),
+    retry: 0,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scheduled'] })
+      setCancelError(null)
+      setCancelTarget(null)
+    },
+    onError: (e: any) => {
+      setCancelError(String(e?.message ?? 'Failed to cancel scheduled notification'))
+      // Close the dialog so we don't accidentally re-trigger rapid retries.
       setCancelTarget(null)
     },
   })
@@ -74,14 +93,16 @@ export function ScheduledTable() {
                 <TableRow>
                   <TableHead>ID</TableHead>
                   <TableHead>Channel</TableHead>
-                  <TableHead>User</TableHead>
+                  <TableHead>Client</TableHead>
                   <TableHead>Scheduled At</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {notifications.map((n) => (
+                {notifications.map((n) => {
+                  const client = n.api_key_id ? clientMap[n.api_key_id] : undefined
+                  return (
                   <TableRow key={n.id}>
                     <TableCell>
                       <span className="font-mono text-xs text-muted-foreground">
@@ -95,7 +116,14 @@ export function ScheduledTable() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm">{truncateId(n.user_id, 10)}</span>
+                      {client ? (
+                        <div className="flex flex-col">
+                          <span className="text-sm">{client.name}</span>
+                          <span className="text-xs text-muted-foreground font-mono">{client.prefix}</span>
+                        </div>
+                      ) : (
+                        <span className="text-sm text-muted-foreground">Global</span>
+                      )}
                     </TableCell>
                     <TableCell>
                       <span className="text-sm text-muted-foreground">
@@ -128,7 +156,8 @@ export function ScheduledTable() {
                       </div>
                     </TableCell>
                   </TableRow>
-                ))}
+                  )
+                })}
               </TableBody>
             </Table>
 
@@ -195,6 +224,12 @@ export function ScheduledTable() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {cancelError && (
+        <div className="mt-4">
+          <ErrorState title="Cancel failed" description={cancelError} onRetry={() => setCancelError(null)} />
+        </div>
+      )}
 
       {/* Reschedule dialog */}
       <RescheduleDialog

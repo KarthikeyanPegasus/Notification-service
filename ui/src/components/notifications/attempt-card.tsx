@@ -13,6 +13,9 @@ interface AttemptCardProps {
 export function AttemptCard({ attempt, index }: AttemptCardProps) {
   const isSuccess = ['DELIVERED', 'SENT', 'SUCCESS'].includes(attempt.status.toUpperCase())
   const isFailed = ['FAILED', 'ERROR'].includes(attempt.status.toUpperCase())
+  const providerMsgID = attempt.provider_message_id ?? attempt.provider_msg_id ?? undefined
+  const errText = attempt.error ?? attempt.error_message ?? undefined
+  const errCode = attempt.error_code ?? undefined
 
   return (
     <Card className={cn(
@@ -44,26 +47,29 @@ export function AttemptCard({ attempt, index }: AttemptCardProps) {
           </div>
         </div>
 
-        {attempt.provider_message_id && (
+        {providerMsgID && (
           <div className="flex items-center gap-2 text-muted-foreground">
             <Hash className="h-3.5 w-3.5" />
             <span>
               Provider ID:{' '}
               <code className="text-xs bg-muted rounded px-1 text-foreground">
-                {attempt.provider_message_id}
+                {providerMsgID}
               </code>
             </span>
           </div>
         )}
 
-        {attempt.error && (
+        {errText && (
           <div className="flex items-start gap-2 text-red-600 bg-red-50 dark:bg-red-950/30 rounded-md p-3">
             <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
-            <p className="text-xs font-mono">{attempt.error}</p>
+            <div className="text-xs font-mono">
+              {errCode && <div className="opacity-80">code: {errCode}</div>}
+              <div>{errText}</div>
+            </div>
           </div>
         )}
 
-        {isSuccess && !attempt.error && (
+        {isSuccess && !errText && (
           <div className="flex items-center gap-2 text-green-600">
             <CheckCircle2 className="h-4 w-4" />
             <span className="text-xs">Delivered successfully</span>

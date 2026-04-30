@@ -31,13 +31,22 @@ func NewWebSocketWorker(
 	notifRepo *repository.NotificationRepository,
 	attemptRepo *repository.AttemptRepository,
 	eventRepo *repository.EventRepository,
+	govRepo *repository.GovernanceRepository,
+	vendorRepo nsconfig.Repository,
+	cfg *nsconfig.Config,
 	registry *circuit.Registry,
 	log *zap.Logger,
+	opts ...WorkerOptions,
 ) *WebSocketWorker {
+	priority := domain.PriorityLow
+	if len(opts) > 0 && opts[0].Priority != "" {
+		priority = opts[0].Priority
+	}
+	subKey := pubsub.PriorityTopicKey(string(domain.ChannelWebSocket), string(priority))
 	return &WebSocketWorker{
 		base: newBaseWorker(
-			domain.ChannelWebSocket, "websocket-worker-sub",
-			subscriber, notifRepo, attemptRepo, eventRepo, registry, log,
+			domain.ChannelWebSocket, subKey,
+			subscriber, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
 		),
 		cache: cacheClient,
 	}
@@ -71,8 +80,11 @@ func (w *WebSocketWorker) RemoveConnection(userID string, conn *websocket.Conn) 
 }
 
 func (w *WebSocketWorker) Start(ctx context.Context) error {
-	w.base.log.Info("websocket worker started")
-	return w.base.subscriber.Subscribe(ctx, "websocket", func(ctx context.Context, msg *pubsub.Message) error {
+	w.base.log.Info("websocket worker started",
+		zap.String("priority", string(w.base.priority)),
+		zap.String("subscription", w.base.subscription),
+	)
+	return w.base.subscriber.Subscribe(ctx, w.base.subscription, func(ctx context.Context, msg *pubsub.Message) error {
 		return w.base.dispatch(ctx, msg, func(ctx context.Context, n *domain.Notification) (domain.DeliveryResult, error) {
 			return w.sendToUser(ctx, n)
 		}, "websocket-gateway")

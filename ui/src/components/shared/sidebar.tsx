@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import {
   LayoutDashboard,
   Bell,
@@ -14,24 +14,62 @@ import {
   ShoppingBag,
   ShieldAlert,
   Book,
+  KeyRound,
+  Users,
+  UserCircle2,
+  LogOut,
+  Moon,
+  Sun,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import {
+  clearAuthToken,
+  getAuthUser,
+} from '@/lib/api'
+import { getStoredTheme, toggleTheme, type ThemeMode } from '@/lib/theme'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 
 const STORAGE_KEY = 'notifyhub-sidebar-collapsed'
 
-const navItems = [
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/app-store', label: 'App Store', icon: ShoppingBag },
-  { href: '/notifications', label: 'Notifications', icon: Bell },
-  { href: '/reports', label: 'Reports', icon: BarChart3 },
-  { href: '/scheduled', label: 'Scheduled', icon: Clock },
-  { href: '/templates', label: 'Templates', icon: Bell },
-  { href: '/governance/suppressions', label: 'Suppressions', icon: ShieldAlert },
-  { href: '/governance/opt-outs', label: 'Opt-outs', icon: ShieldAlert },
-  { href: '/docs', label: 'API Documentation', icon: Book },
-  { href: '/settings', label: 'Settings', icon: Settings },
+type Role = 'admin' | 'manager' | 'dev' | 'support'
+type NavItem = { href: string; label: string; icon: React.ElementType; roles: Role[]; children?: NavItem[] }
+
+const navItems: NavItem[] = [
+  { href: '/admin', label: 'Admin Dashboard', icon: ShieldAlert, roles: ['admin'] },
+  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'manager', 'dev', 'support'] },
+  { href: '/notifications', label: 'Notifications', icon: Bell, roles: ['admin', 'manager', 'dev', 'support'] },
+  { href: '/reports', label: 'Reports', icon: BarChart3, roles: ['admin', 'manager', 'dev', 'support'] },
+
+  { href: '/app-store', label: 'App Store', icon: ShoppingBag, roles: ['admin', 'manager', 'dev'] },
+  { href: '/templates', label: 'Templates', icon: Bell, roles: ['admin', 'manager', 'dev'] },
+  { href: '/scheduled', label: 'Scheduled', icon: Clock, roles: ['admin', 'manager', 'dev', 'support'] },
+  { href: '/settings', label: 'Settings', icon: Settings, roles: ['admin', 'manager', 'dev'] },
+
+  { href: '/clients', label: 'Client management', icon: KeyRound, roles: ['admin'] },
+  { href: '/people', label: 'People', icon: Users, roles: ['admin'] },
+  { href: '/governance/suppressions', label: 'Suppressions', icon: ShieldAlert, roles: ['admin', 'support'] },
+  { href: '/governance/opt-outs', label: 'Opt-outs', icon: ShieldAlert, roles: ['admin', 'support'] },
+
+  {
+    href: '/docs',
+    label: 'Docs',
+    icon: Book,
+    roles: ['admin', 'dev'],
+    children: [
+      { href: '/docs/api', label: 'API Reference', icon: Book, roles: ['admin', 'dev'] },
+      { href: '/docs/sdk/go', label: 'SDK — Go', icon: Book, roles: ['admin', 'dev'] },
+      { href: '/docs/sdk/dotnet', label: 'SDK — .NET', icon: Book, roles: ['admin', 'dev'] },
+    ],
+  },
 ]
 
 function NavLink({
@@ -40,6 +78,7 @@ function NavLink({
   icon: Icon,
   active,
   compact,
+  indent,
   onClick,
 }: {
   href: string
@@ -47,6 +86,7 @@ function NavLink({
   icon: React.ElementType
   active: boolean
   compact: boolean
+  indent?: boolean
   onClick?: () => void
 }) {
   return (
@@ -56,7 +96,7 @@ function NavLink({
       onClick={onClick}
       className={cn(
         'flex items-center gap-3 rounded-md py-2 text-sm font-medium transition-colors',
-        compact ? 'justify-center px-2' : 'px-3',
+        compact ? 'justify-center px-2' : indent ? 'pl-7 pr-3' : 'px-3',
         active
           ? 'bg-primary text-primary-foreground'
           : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
@@ -68,13 +108,72 @@ function NavLink({
   )
 }
 
+function NavGroup({
+  item,
+  pathname,
+  compact,
+  onClick,
+}: {
+  item: NavItem
+  pathname: string
+  compact: boolean
+  onClick?: () => void
+}) {
+  const isParentActive = pathname === item.href || pathname.startsWith(item.href + '/')
+  if (!item.children) {
+    return (
+      <NavLink
+        href={item.href}
+        label={item.label}
+        icon={item.icon}
+        active={isParentActive}
+        compact={compact}
+        onClick={onClick}
+      />
+    )
+  }
+  return (
+    <div>
+      <NavLink
+        href={item.href}
+        label={item.label}
+        icon={item.icon}
+        active={isParentActive && !item.children.some(c => pathname.startsWith(c.href))}
+        compact={compact}
+        onClick={onClick}
+      />
+      {(isParentActive || !compact) && (
+        <div className={cn('space-y-0.5 mt-0.5', compact && 'hidden')}>
+          {item.children.map(child => (
+            <NavLink
+              key={child.href}
+              href={child.href}
+              label={child.label}
+              icon={child.icon}
+              active={pathname === child.href || pathname.startsWith(child.href + '/')}
+              compact={compact}
+              indent
+              onClick={onClick}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function Sidebar() {
-  const pathname = usePathname()
+  const pathname = usePathname() ?? ''
+  const router = useRouter()
   const [mobileOpen, setMobileOpen] = useState(false)
   /** Persisted: true = icon rail is the resting state (user chose collapse via logo). */
   const [collapsed, setCollapsed] = useState(false)
   /** While resting collapsed, hover temporarily expands until mouse leaves. */
   const [hoverExpanded, setHoverExpanded] = useState(false)
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    if (typeof document !== 'undefined' && document.documentElement.classList.contains('dark')) return 'dark'
+    return 'light'
+  })
 
   useEffect(() => {
     try {
@@ -84,6 +183,18 @@ export function Sidebar() {
     } catch {
       /* ignore */
     }
+  }, [])
+
+  useEffect(() => {
+    const stored = getStoredTheme()
+    if (stored) setTheme(stored)
+
+    const onChanged = (e: Event) => {
+      const next = (e as CustomEvent).detail as ThemeMode
+      if (next === 'dark' || next === 'light') setTheme(next)
+    }
+    window.addEventListener('notifyhub-theme-changed', onChanged as any)
+    return () => window.removeEventListener('notifyhub-theme-changed', onChanged as any)
   }, [])
 
   const setCollapsedPersist = (next: boolean) => {
@@ -97,6 +208,20 @@ export function Sidebar() {
   }
 
   const compactNav = collapsed && !hoverExpanded
+  const authUser = getAuthUser()
+  const role = (authUser?.role ?? 'support') as Role
+
+  const logout = () => {
+    clearAuthToken()
+    router.replace('/login')
+  }
+
+  const visibleNavItems = useMemo(() => {
+    return navItems.filter((i) => i.roles.includes(role))
+  }, [role])
+
+  // Never return early before hooks run; keep this after hooks to avoid hook-order issues.
+  if (pathname === '/login') return null
 
   const navContent = (opts: { compact: boolean }) => (
     <div className="flex h-full flex-col">
@@ -124,24 +249,82 @@ export function Sidebar() {
       </div>
 
       <nav className="flex-1 space-y-1 overflow-y-auto overflow-x-hidden p-3">
-        {navItems.map((item) => (
-          <NavLink
+        {visibleNavItems.map((item) => (
+          <NavGroup
             key={item.href}
-            href={item.href}
-            label={item.label}
-            icon={item.icon}
+            item={item}
+            pathname={pathname}
             compact={opts.compact}
-            active={pathname === item.href || pathname.startsWith(item.href + '/')}
             onClick={() => setMobileOpen(false)}
           />
         ))}
       </nav>
 
-      {!opts.compact && (
-        <div className="mt-auto border-t px-4 py-3">
-          <p className="text-xs text-muted-foreground">Notification Service v0.1</p>
-        </div>
-      )}
+      <div className="mt-auto border-t p-3">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className={cn(
+                'w-full rounded-md px-2 py-2 hover:bg-accent transition-colors outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring',
+                opts.compact ? 'flex items-center justify-center' : 'flex items-center gap-2',
+              )}
+              aria-label="Open profile menu"
+            >
+              <UserCircle2 className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden />
+              {!opts.compact && (
+                <div className="min-w-0 flex-1 text-left">
+                  <p className="text-sm font-medium truncate">{authUser?.name ?? 'Account'}</p>
+                  <p className="text-xs text-muted-foreground truncate">{authUser?.email ?? role}</p>
+                </div>
+              )}
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align={opts.compact ? 'center' : 'start'} side="top" className="w-56">
+            <DropdownMenuLabel>
+              <div className="min-w-0">
+                <p className="text-sm font-medium truncate">{authUser?.name ?? 'Account'}</p>
+                <p className="text-xs text-muted-foreground truncate">
+                  {authUser?.email ?? ''}
+                  {authUser?.email ? ' • ' : ''}
+                  {role}
+                </p>
+              </div>
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <Link href="/profile" onClick={() => setMobileOpen(false)}>
+                <UserCircle2 className="mr-2 h-4 w-4" aria-hidden />
+                Profile
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={(e) => {
+                e.preventDefault()
+                const next = toggleTheme()
+                setTheme(next)
+              }}
+            >
+              {theme === 'dark' ? <Moon className="mr-2 h-4 w-4" aria-hidden /> : <Sun className="mr-2 h-4 w-4" aria-hidden />}
+              Theme: {theme === 'dark' ? 'Dark' : 'Light'}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={(e) => {
+                e.preventDefault()
+                logout()
+              }}
+            >
+              <LogOut className="mr-2 h-4 w-4" aria-hidden />
+              Log out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {!opts.compact && (
+          <p className="mt-3 text-xs text-muted-foreground">Notification Service v0.1</p>
+        )}
+      </div>
     </div>
   )
 

@@ -6,10 +6,13 @@ info:
     Supports Email, SMS, Push, Webhooks, WebSockets, and Slack (Incoming Webhook–style payloads).
 
     **Slack:** use channel `slack`. Configure the Incoming Webhook URL in the App Store / vendor config
-    (`slack` / `webhook_url`). Set `recipient` to that webhook URL (or your deployment’s resolved address),
+    (`slack` / `webhook_url`). Set `recipient` to that webhook URL (or your deployment's resolved address),
     and send message text via `body`, a template, or `template_variables` keys `message` / `text`.
     Async worker processing uses the Pub/Sub topic `notifications-slack`.
-  version: 1.0.0
+
+    **Authentication:** All endpoints require a JWT `Bearer` token unless noted otherwise. Service-to-service
+    endpoints (OTP) use the `X-Service-Token` header instead.
+  version: 1.1.0
   contact:
     name: Spidey Deepmind Team
     url: https://github.com/spidey/notification-service
@@ -33,14 +36,14 @@ components:
     Channel:
       type: string
       enum: [email, sms, push, websocket, webhook, slack]
-    
+
     Priority:
       type: string
       enum: [high, medium, low]
-    
+
     NotificationStatus:
       type: string
-      enum: [pending, queued, sent, delivered, failed, cancelled, bounced]
+      enum: [pending, queued, sent, delivered, failed, cancelled, bounced, suppressed]
 
     Notification:
       type: object
@@ -48,6 +51,8 @@ components:
         id: { type: string, format: uuid }
         idempotency_key: { type: string }
         user_id: { type: string, format: uuid }
+        api_key_id: { type: string, format: uuid, nullable: true }
+        client_name: { type: string, description: Name of the API key client that sent this notification. }
         channel: { $ref: '#/components/schemas/Channel' }
         priority: { $ref: '#/components/schemas/Priority' }
         type: { type: string }
@@ -60,9 +65,59 @@ components:
             data: { type: object, additionalProperties: { type: string } }
         recipient: { type: string }
         status: { $ref: '#/components/schemas/NotificationStatus' }
+        provider: { type: string, description: Last provider that handled delivery. }
+        source: { type: string, description: Ingress source (api, pubsub, redis). }
+        forced_vendor: { type: string, description: Vendor forced for delivery (bypasses routing). }
         scheduled_at: { type: string, format: date-time, nullable: true }
         sent_at: { type: string, format: date-time, nullable: true }
         delivered_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        attempts:
+          type: array
+          items: { $ref: '#/components/schemas/NotificationAttempt' }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/NotificationEvent' }
+
+    NotificationAttempt:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        notification_id: { type: string, format: uuid }
+        attempt_number: { type: integer }
+        status: { type: string, enum: [sent, failed, delivered, bounced] }
+        provider: { type: string }
+        provider_msg_id: { type: string, nullable: true }
+        error_code: { type: string, nullable: true }
+        error_message: { type: string, nullable: true }
+        latency_ms: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    NotificationEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        notification_id: { type: string, format: uuid }
+        event_type:
+          type: string
+          enum: [queued, sent, delivered, failed, bounced, clicked, opened, cancelled, suppressed, opted_out]
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+
+    ScheduledNotification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        notification_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        channel: { $ref: '#/components/schemas/Channel' }
+        template_id: { type: string, format: uuid, nullable: true }
+        template_vars: { type: object, additionalProperties: { type: string } }
+        scheduled_at: { type: string, format: date-time }
+        original_at: { type: string, format: date-time }
+        status: { $ref: '#/components/schemas/NotificationStatus' }
+        reschedule_count: { type: integer }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
@@ -94,12 +149,21 @@ components:
           items: { $ref: '#/components/schemas/Channel' }
         type: { type: string, maxLength: 50 }
         body: { type: string, description: Optional message body when not using a template. }
+        html: { type: string, description: Optional HTML body (email only). }
         template_id: { type: string, format: uuid }
         template_variables:
           type: object
           additionalProperties: { type: string }
         recipient: { type: string, maxLength: 512 }
-        scheduled_at: { type: string, format: date-time }
+        slack_channel:
+          type: string
+          description: Optional Slack channel name configured in Slack vendor settings (resolved to a webhook URL). Overrides `recipient` for Slack.
+          maxLength: 80
+        scheduled_at:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp. When set, notification is deferred until this time.
+        priority: { $ref: '#/components/schemas/Priority' }
 
     OTPSendRequest:
       type: object
@@ -125,11 +189,401 @@ components:
         message: { type: string }
         request_id: { type: string, format: uuid }
 
+    SuppressionType:
+      type: string
+      description: The identifier category being suppressed.
+      enum: [email, sms, push, slack, webhook]
+
+    Suppression:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/SuppressionType' }
+        value:
+          type: string
+          description: The identifier value (email address, phone number, push token, webhook URL, etc.).
+        reason: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+
+    AddSuppressionRequest:
+      type: object
+      required: [type, value]
+      properties:
+        type: { $ref: '#/components/schemas/SuppressionType' }
+        value:
+          type: string
+          description: The identifier to suppress.
+          maxLength: 512
+        reason: { type: string, maxLength: 255 }
+        metadata: { type: object, additionalProperties: true }
+
+    OptOut:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        channel: { $ref: '#/components/schemas/Channel' }
+        reason: { type: string }
+        source:
+          type: string
+          description: How the opt-out was initiated (e.g. manual, unsubscribe_link, sms_stop, api, user_request).
+        created_at: { type: string, format: date-time }
+
+    AddOptOutRequest:
+      type: object
+      required: [user_id, channel]
+      properties:
+        user_id: { type: string, format: uuid }
+        channel: { $ref: '#/components/schemas/Channel' }
+        reason: { type: string, maxLength: 255 }
+        source: { type: string, maxLength: 100 }
+
+    ReportSummaryItem:
+      type: object
+      properties:
+        channel: { $ref: '#/components/schemas/Channel' }
+        date: { type: string, format: date }
+        total: { type: integer }
+        sent: { type: integer }
+        delivered: { type: integer }
+        failed: { type: integer }
+        bounced: { type: integer }
+        success_rate: { type: number, format: float }
+        p50_latency_ms: { type: number, format: float }
+        p95_latency_ms: { type: number, format: float }
+
+    IngressBreakdownItem:
+      type: object
+      properties:
+        source: { type: string, description: Ingress source name (api, pubsub, redis). }
+        count: { type: integer }
+
+    BreakdownRow:
+      type: object
+      description: Generic key/count pair used by country and domain breakdown endpoints.
+      properties:
+        key: { type: string }
+        count: { type: integer }
+
+    VendorMetric:
+      type: object
+      description: Real-time vendor health metrics computed over the last 12 hours.
+      properties:
+        provider: { type: string }
+        total: { type: integer }
+        success_rate: { type: number, format: float }
+        avg_latency_ms: { type: number, format: float }
+        latest_error: { type: string }
+        last_status: { type: string }
+        cost_per_msg: { type: number, format: float }
+        estimated_cost: { type: number, format: float }
+        status:
+          type: string
+          enum: [healthy, degraded, down]
+        payment_status:
+          type: string
+          enum: [paid, unpaid, low_balance]
+
+    VendorBilling:
+      type: object
+      description: |
+        Per-vendor billing summary. `is_actual` is true when cost data was fetched live from the
+        vendor's API; false when it is estimated from DB send counts × published per-message rate.
+      properties:
+        provider: { type: string }
+        total_cost: { type: number, format: float, description: Total spend in `currency`. }
+        balance: { type: number, format: float, nullable: true, description: Remaining account credit (SMS balance providers only). }
+        currency: { type: string, example: USD }
+        period: { type: string, description: Billing period label (e.g. all-time, current-month). }
+        is_actual: { type: boolean }
+        source: { type: string, description: How the cost was obtained (e.g. twilio-api, estimated, free). }
+        total_count: { type: integer, description: Number of messages counted for this cost. }
+        cost_per_msg: { type: number, format: float }
+        error: { type: string, nullable: true, description: Non-empty if the vendor API call failed. }
+
+    ScheduledStats:
+      type: object
+      description: Aggregate metrics for scheduled notifications within a date range.
+      properties:
+        total_scheduled: { type: integer, description: Notifications created with a scheduled_at timestamp. }
+        pending: { type: integer, description: Still awaiting dispatch (status pending or queued). }
+        delivered: { type: integer, description: Successfully sent or delivered. }
+        avg_delivery_latency_ms:
+          type: number
+          format: float
+          nullable: true
+          description: Mean time from scheduled_at to actual send/delivery, in milliseconds.
+
+    ApiKeyClient:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        prefix: { type: string }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+
+    LoginResponse:
+      type: object
+      properties:
+        token: { type: string, description: JWT bearer token. }
+        user:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            email: { type: string }
+            name: { type: string }
+            role: { type: string }
+
+    VendorType:
+      type: string
+      description: Vendor identifier used in the App Store and `/admin/config/vendors/{vendor_type}`.
+      enum:
+        - twilio
+        - plivo
+        - vonage
+        - messagebird
+        - ses
+        - mailgun
+        - sendgrid
+        - postmark
+        - smtp
+        - email
+        - fcm
+        - onesignal
+        - pusher
+        - slack
+        - discord
+        - teams
+        - telegram
+        - webhooks
+        - webhook_routing
+        - sms_routing
+        - email_routing
+        - push_routing
+
+    VendorConfig:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        vendor_type: { $ref: '#/components/schemas/VendorType' }
+        config_json:
+          type: object
+          description: Provider-specific JSON configuration. See `VendorConfigPayloads` for known shapes.
+          additionalProperties: true
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    VendorConfigUpsertRequest:
+      type: object
+      required: [config]
+      properties:
+        config:
+          type: object
+          description: Provider-specific JSON configuration.
+          additionalProperties: true
+
+    TestDeliveryRequest:
+      type: object
+      required: [channel, recipient, body]
+      properties:
+        channel:
+          type: string
+          enum: [sms, email, slack, webhook, push]
+        recipient:
+          type: string
+          description: Channel-specific destination (phone/email/webhook URL/device token/external user id/etc.).
+        body: { type: string }
+        subject: { type: string }
+        slack_channel:
+          type: string
+          description: Optional Slack channel name when using Slack vendor config channels.
+
+    VendorConfigPayloads:
+      type: object
+      description: |
+        Known vendor config payload shapes used by the App Store UI.
+        These objects are stored inside `VendorConfigUpsertRequest.config` (and returned in `VendorConfig.config_json`).
+      properties:
+        twilio: { $ref: '#/components/schemas/TwilioConfig' }
+        plivo: { $ref: '#/components/schemas/PlivoConfig' }
+        vonage: { $ref: '#/components/schemas/VonageConfig' }
+        messagebird: { $ref: '#/components/schemas/MessageBirdConfig' }
+        ses: { $ref: '#/components/schemas/SESConfig' }
+        mailgun: { $ref: '#/components/schemas/MailgunConfig' }
+        sendgrid: { $ref: '#/components/schemas/SendGridConfig' }
+        postmark: { $ref: '#/components/schemas/PostmarkConfig' }
+        fcm: { $ref: '#/components/schemas/FCMConfig' }
+        onesignal: { $ref: '#/components/schemas/OneSignalConfig' }
+        pusher: { $ref: '#/components/schemas/PusherBeamsConfig' }
+        slack: { $ref: '#/components/schemas/SlackConfig' }
+        discord: { $ref: '#/components/schemas/DiscordConfig' }
+        teams: { $ref: '#/components/schemas/TeamsConfig' }
+        telegram: { $ref: '#/components/schemas/TelegramConfig' }
+        webhooks: { $ref: '#/components/schemas/WebhooksConfig' }
+
+    TwilioConfig:
+      type: object
+      required: [account_sid, auth_token, from_number]
+      properties:
+        account_sid: { type: string }
+        auth_token: { type: string }
+        from_number: { type: string }
+
+    PlivoConfig:
+      type: object
+      required: [auth_id, auth_token, from_number]
+      properties:
+        auth_id: { type: string }
+        auth_token: { type: string }
+        from_number: { type: string }
+
+    VonageConfig:
+      type: object
+      required: [api_key, api_secret, from]
+      properties:
+        api_key: { type: string }
+        api_secret: { type: string }
+        from: { type: string }
+
+    MessageBirdConfig:
+      type: object
+      required: [access_key, originator]
+      properties:
+        access_key: { type: string }
+        originator: { type: string, description: Sender id or phone number used as "from". }
+
+    SESConfig:
+      type: object
+      properties:
+        region: { type: string }
+        iam_username: { type: string }
+        smtp_username: { type: string }
+        smtp_password: { type: string }
+        access_key_id: { type: string }
+        access_secret: { type: string }
+        secret_access_key: { type: string }
+        from_address: { type: string }
+        from_name: { type: string }
+
+    MailgunConfig:
+      type: object
+      required: [domain, api_key]
+      properties:
+        domain: { type: string }
+        api_key: { type: string }
+        from: { type: string }
+
+    SendGridConfig:
+      type: object
+      required: [api_key, from_email]
+      properties:
+        api_key: { type: string }
+        from_email: { type: string }
+        from_name: { type: string }
+
+    PostmarkConfig:
+      type: object
+      required: [server_token, from_email]
+      properties:
+        server_token: { type: string }
+        from_email: { type: string }
+        from_name: { type: string }
+
+    FCMConfig:
+      type: object
+      properties:
+        service_account_json:
+          type: string
+          description: Full Firebase service account JSON string (recommended).
+
+    OneSignalConfig:
+      type: object
+      required: [app_id, rest_api_key]
+      properties:
+        app_id: { type: string }
+        rest_api_key: { type: string }
+
+    PusherBeamsConfig:
+      type: object
+      required: [instance_id, secret_key]
+      properties:
+        instance_id: { type: string }
+        secret_key: { type: string }
+
+    SlackConfig:
+      type: object
+      properties:
+        webhook_url: { type: string }
+        default_username: { type: string }
+        channels:
+          type: array
+          items:
+            type: object
+            properties:
+              channel_name: { type: string }
+              webhook_url: { type: string }
+
+    DiscordConfig:
+      type: object
+      required: [webhook_url]
+      properties:
+        webhook_url: { type: string }
+        timeout_seconds: { type: integer, default: 30 }
+
+    TeamsConfig:
+      type: object
+      required: [webhook_url]
+      properties:
+        webhook_url: { type: string }
+        timeout_seconds: { type: integer, default: 30 }
+
+    TelegramConfig:
+      type: object
+      required: [bot_token, chat_id]
+      properties:
+        bot_token: { type: string }
+        chat_id: { type: string }
+        timeout_seconds: { type: integer, default: 30 }
+
+    WebhooksConfig:
+      type: object
+      properties:
+        signing_secret: { type: string }
+        timeout_seconds: { type: integer, default: 30 }
+        max_retries: { type: integer, default: 5 }
+
+  parameters:
+    DateFrom:
+      name: date_from
+      in: query
+      description: Start of the time range (RFC3339 / ISO 8601).
+      schema: { type: string, format: date-time }
+    DateTo:
+      name: date_to
+      in: query
+      description: End of the time range (RFC3339 / ISO 8601).
+      schema: { type: string, format: date-time }
+    ApiKeyIdScope:
+      name: api_key_id
+      in: query
+      description: Scope results to a specific API key client. Omit for the global / all-clients view.
+      schema: { type: string, format: uuid }
+
   responses:
     TooManyRequests:
       description: Rate limit exceeded or IP blocked
       content:
-        application_json:
+        application/json:
           schema: { $ref: '#/components/schemas/Error' }
       headers:
         Retry-After:
@@ -139,7 +593,46 @@ components:
 security:
   - BearerAuth: []
 
+tags:
+  - name: Auth
+    description: Authentication
+  - name: Notifications
+    description: Core notification send and query operations
+  - name: Scheduled
+    description: Scheduled notification management
+  - name: OTP
+    description: One-time password generation and verification
+  - name: Reports
+    description: Analytics and reporting
+  - name: Governance
+    description: Suppressions and opt-outs
+  - name: Templates
+    description: Message template CRUD
+  - name: Admin
+    description: Vendor config, API key management, and test delivery
+
 paths:
+  # ── Auth ──────────────────────────────────────────────────────────────────
+  /auth/login:
+    post:
+      summary: Authenticate and obtain a JWT
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '401':
+          description: Invalid credentials
+
+  # ── Notifications ─────────────────────────────────────────────────────────
   /notifications:
     post:
       summary: Send a notification
@@ -147,22 +640,24 @@ paths:
       requestBody:
         required: true
         content:
-          application_json:
+          application/json:
             schema: { $ref: '#/components/schemas/SendRequest' }
       responses:
         '202':
           description: Notification accepted
           content:
-            application_json:
+            application/json:
               schema:
                 type: object
                 properties:
                   notification_id: { type: string, format: uuid }
                   status: { type: string }
+                  workflow_id: { type: string }
+                  scheduled_at: { type: string, format: date-time, nullable: true }
         '400':
           description: Validation error
           content:
-            application_json:
+            application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '429':
           $ref: '#/components/responses/TooManyRequests'
@@ -176,7 +671,7 @@ paths:
           schema: { type: integer, default: 1 }
         - name: page_size
           in: query
-          schema: { type: integer, default: 50 }
+          schema: { type: integer, default: 50, maximum: 200 }
         - name: user_id
           in: query
           schema: { type: string, format: uuid }
@@ -186,11 +681,22 @@ paths:
         - name: status
           in: query
           schema: { $ref: '#/components/schemas/NotificationStatus' }
+        - name: recipient
+          in: query
+          description: Filter by recipient (partial match, case-insensitive).
+          schema: { type: string }
+        - name: search
+          in: query
+          description: Full-text search across recipient, notification ID, and idempotency key.
+          schema: { type: string }
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - $ref: '#/components/parameters/ApiKeyIdScope'
       responses:
         '200':
           description: Success
           content:
-            application_json:
+            application/json:
               schema:
                 type: object
                 properties:
@@ -208,20 +714,132 @@ paths:
         required: true
         schema: { type: string, format: uuid }
     get:
-      summary: Get notification details
+      summary: Get notification details (with attempts and events)
       tags: [Notifications]
       responses:
         '200':
           description: Success
           content:
-            application_json:
+            application/json:
+              schema: { $ref: '#/components/schemas/Notification' }
+        '404':
+          description: Not found
+
+  /notifications/{id}/sync:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Sync delivery status from the vendor
+      description: |
+        Polls the originating provider for the latest delivery status and updates the notification
+        record. Only applicable to notifications in non-final states (pending, queued, sent).
+      tags: [Notifications]
+      responses:
+        '200':
+          description: Synced
+          content:
+            application/json:
               schema:
                 type: object
                 properties:
-                  notification: { $ref: '#/components/schemas/Notification' }
-                  attempts: { type: array, items: { type: object } }
-                  events: { type: array, items: { type: object } }
+                  status: { $ref: '#/components/schemas/NotificationStatus' }
+                  provider_status: { type: string }
+                  synced_at: { type: string, format: date-time }
+        '404':
+          description: Not found
 
+  /notifications/{id}/retrigger:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Retrigger delivery of a failed or stuck notification
+      description: Starts a new delivery workflow for the existing notification. Does not create a new record.
+      tags: [Notifications]
+      responses:
+        '200':
+          description: Retriggered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notification_id: { type: string, format: uuid }
+                  status: { type: string }
+
+  # ── Scheduled notifications ───────────────────────────────────────────────
+  /notifications/scheduled:
+    get:
+      summary: List scheduled notifications
+      tags: [Scheduled]
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 20, maximum: 200 }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/NotificationStatus' }
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ScheduledNotification' }
+                  total: { type: integer }
+                  page: { type: integer }
+                  page_size: { type: integer }
+
+  /notifications/{id}/schedule:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      summary: Reschedule a pending notification
+      tags: [Scheduled]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scheduled_at]
+              properties:
+                scheduled_at: { type: string, format: date-time, description: New dispatch time (must be in the future). }
+      responses:
+        '200':
+          description: Rescheduled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Notification' }
+        '400':
+          description: Invalid time or not reschedulable
+        '404':
+          description: Not found
+    delete:
+      summary: Cancel a scheduled notification
+      tags: [Scheduled]
+      responses:
+        '204':
+          description: Cancelled
+        '404':
+          description: Not found
+
+  # ── OTP ───────────────────────────────────────────────────────────────────
   /otp/send:
     post:
       summary: Generate and send OTP
@@ -231,13 +849,13 @@ paths:
       requestBody:
         required: true
         content:
-          application_json:
+          application/json:
             schema: { $ref: '#/components/schemas/OTPSendRequest' }
       responses:
         '200':
           description: OTP Sent
           content:
-            application_json:
+            application/json:
               schema:
                 type: object
                 properties:
@@ -255,55 +873,266 @@ paths:
       requestBody:
         required: true
         content:
-          application_json:
+          application/json:
             schema: { $ref: '#/components/schemas/OTPVerifyRequest' }
       responses:
         '200':
           description: Verification result
           content:
-            application_json:
+            application/json:
               schema:
                 type: object
                 properties:
                   verified: { type: boolean }
 
+  # ── Reports ───────────────────────────────────────────────────────────────
   /reports/summary:
     get:
-      summary: Get delivery summary report
+      summary: Delivery summary by channel and date
+      description: Returns aggregated sent/delivered/failed/bounced counts plus latency percentiles, grouped by channel and calendar day.
+      tags: [Reports]
+      parameters:
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ReportSummaryItem' }
+
+  /reports/ingress:
+    get:
+      summary: Ingress source breakdown
+      description: Returns the count of notification requests grouped by ingress source (api, pubsub, redis).
+      tags: [Reports]
+      parameters:
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/IngressBreakdownItem' }
+
+  /reports/sms-countries:
+    get:
+      summary: SMS count by country prefix
+      description: Returns SMS notification counts grouped by destination country (derived from the E.164 phone prefix). Top 10 countries.
+      tags: [Reports]
+      parameters:
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BreakdownRow' }
+
+  /reports/email-domains:
+    get:
+      summary: Email count by recipient domain
+      description: Returns email notification counts grouped by recipient domain (e.g. gmail.com). Top 10 domains.
+      tags: [Reports]
+      parameters:
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BreakdownRow' }
+
+  /reports/vendors:
+    get:
+      summary: Real-time vendor health metrics
+      description: |
+        Returns per-provider delivery metrics computed over the last 12 hours.
+        Refreshed on each call; callers should poll at a reasonable interval (e.g. 10 s).
       tags: [Reports]
       responses:
         '200':
           description: Success
           content:
-            application_json:
+            application/json:
               schema:
                 type: array
-                items:
-                  type: object
-                  properties:
-                    channel: { $ref: '#/components/schemas/Channel' }
-                    total: { type: integer }
-                    success_rate: { type: number, format: float }
-                    p50_latency_ms: { type: number, format: float }
-                    p95_latency_ms: { type: number, format: float }
+                items: { $ref: '#/components/schemas/VendorMetric' }
 
+  /reports/billing:
+    get:
+      summary: Vendor billing and cost summary
+      description: |
+        Returns per-vendor cost data. For providers with a billing API (Twilio, Plivo, Vonage,
+        MessageBird), the cost is fetched live. For others (SES, SendGrid, Postmark, Mailgun),
+        cost is estimated from DB send counts × published per-message rate.
+        Free-tier providers (FCM, Slack, Webhook) show zero cost.
+        Response is cached for 5 minutes on the client; server calls vendor APIs with a 12-second timeout.
+      tags: [Reports]
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/VendorBilling' }
+
+  /reports/scheduled-stats:
+    get:
+      summary: Scheduled notification aggregate stats
+      description: |
+        Returns the total number of scheduled notifications within the date range, how many are
+        still pending, how many have been delivered, and the average delivery latency relative to
+        the originally scheduled dispatch time.
+      tags: [Reports]
+      parameters:
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScheduledStats' }
+
+  # ── Governance ────────────────────────────────────────────────────────────
   /governance/suppressions:
     get:
       summary: List active suppressions
+      description: Returns all identifier-level suppressions. Notifications sent to a suppressed identifier are rejected with status `suppressed`.
       tags: [Governance]
       responses:
         '200':
           description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Suppression' }
+        '401':
+          description: Unauthorized
     post:
-      summary: Add to suppression list
+      summary: Add a suppression
+      description: |
+        Blocks all future notifications to the specified identifier on the given channel type.
+        If the same (type, value) pair already exists, the existing record is updated (upsert).
       tags: [Governance]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddSuppressionRequest' }
       responses:
         '201':
-          description: Created
+          description: Suppression created or updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Suppression' }
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Unauthorized
 
+  /governance/suppressions/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      summary: Remove a suppression
+      description: Removes the suppression entry. Future notifications to this identifier will be delivered normally.
+      tags: [Governance]
+      responses:
+        '204':
+          description: Removed
+        '400':
+          description: Invalid ID
+        '401':
+          description: Unauthorized
+
+  /governance/opt-outs:
+    get:
+      summary: List user opt-outs
+      description: Returns all user-level channel opt-outs. Notifications sent to an opted-out user on the specified channel are rejected.
+      tags: [Governance]
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/OptOut' }
+        '401':
+          description: Unauthorized
+    post:
+      summary: Opt a user out of a channel
+      description: |
+        Blocks all future notifications to the specified user on the given channel.
+        If the same (user_id, channel) pair already exists, the record is updated (upsert).
+      tags: [Governance]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddOptOutRequest' }
+      responses:
+        '201':
+          description: Opt-out created or updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OptOut' }
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Unauthorized
+
+  /governance/opt-outs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      summary: Remove a user opt-out
+      description: Re-enables delivery for this user on the previously opted-out channel.
+      tags: [Governance]
+      responses:
+        '204':
+          description: Removed
+        '400':
+          description: Invalid ID
+        '401':
+          description: Unauthorized
+
+  # ── Templates ─────────────────────────────────────────────────────────────
   /templates:
     get:
-      summary: List all active templates
+      summary: List active templates
       tags: [Templates]
       parameters:
         - name: channel
@@ -313,17 +1142,17 @@ paths:
         '200':
           description: Success
           content:
-            application_json:
+            application/json:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/NotificationTemplate' }
     post:
-      summary: Create a new template
+      summary: Create a template
       tags: [Templates]
       requestBody:
         required: true
         content:
-          application_json:
+          application/json:
             schema:
               type: object
               required: [name, channel, body]
@@ -336,7 +1165,7 @@ paths:
         '201':
           description: Created
           content:
-            application_json:
+            application/json:
               schema: { $ref: '#/components/schemas/NotificationTemplate' }
 
   /templates/{id}:
@@ -352,7 +1181,7 @@ paths:
         '200':
           description: Success
           content:
-            application_json:
+            application/json:
               schema: { $ref: '#/components/schemas/NotificationTemplate' }
     put:
       summary: Update a template
@@ -360,7 +1189,7 @@ paths:
       requestBody:
         required: true
         content:
-          application_json:
+          application/json:
             schema:
               type: object
               required: [name, channel, body]
@@ -373,7 +1202,7 @@ paths:
         '200':
           description: Updated
           content:
-            application_json:
+            application/json:
               schema: { $ref: '#/components/schemas/NotificationTemplate' }
     delete:
       summary: Deactivate a template
@@ -381,3 +1210,192 @@ paths:
       responses:
         '204':
           description: No Content
+
+  # ── Admin – Vendor config ─────────────────────────────────────────────────
+  /admin/config/vendors:
+    get:
+      summary: List vendor configurations
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/VendorConfig' }
+        '401':
+          description: Unauthorized
+
+  /admin/config/vendors/{vendor_type}:
+    parameters:
+      - name: vendor_type
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/VendorType' }
+    put:
+      summary: Upsert a vendor configuration
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VendorConfigUpsertRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+        '400':
+          description: Invalid request
+        '401':
+          description: Unauthorized
+    delete:
+      summary: Remove (deactivate) a vendor configuration
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+        '401':
+          description: Unauthorized
+
+  /admin/test-delivery/{vendor_type}:
+    parameters:
+      - name: vendor_type
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/VendorType' }
+    post:
+      summary: Send a test notification through a specific vendor
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TestDeliveryRequest' }
+      responses:
+        '200':
+          description: Workflow triggered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  vendor: { $ref: '#/components/schemas/VendorType' }
+                  notification_id: { type: string, format: uuid }
+                  status: { type: string }
+                  workflow_id: { type: string }
+        '400':
+          description: Validation error
+        '401':
+          description: Unauthorized
+
+  # ── Admin – API key management ────────────────────────────────────────────
+  /admin/api-keys:
+    get:
+      summary: List all API key clients
+      description: Admin-only. Returns all active (non-revoked) API keys.
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApiKeyClient' }
+        '401':
+          description: Unauthorized
+    post:
+      summary: Create an API key
+      description: Admin-only. Creates a new API key client. The raw key is returned once and cannot be retrieved again.
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { $ref: '#/components/schemas/ApiKeyClient' }
+                  api_key: { type: string, description: The raw API key. Store it securely — it will not be shown again. }
+        '401':
+          description: Unauthorized
+
+  /admin/api-keys/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      summary: Revoke an API key
+      description: Admin-only. Permanently revokes the API key. All subsequent requests using it will be rejected.
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      responses:
+        '204':
+          description: Revoked
+        '401':
+          description: Unauthorized
+
+  # ── Me (current user helpers) ─────────────────────────────────────────────
+  /me/clients:
+    get:
+      summary: List API key clients visible to the current user
+      description: |
+        Admins see all clients. Dev/support roles see only the clients assigned to them.
+        Used by the UI scope selector to filter notifications and reports.
+      tags: [Notifications]
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApiKeyClient' }
+        '401':
+          description: Unauthorized

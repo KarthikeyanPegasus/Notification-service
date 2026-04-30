@@ -1,4 +1,4 @@
-import { Mail, MessageSquare, Bell, Globe, Webhook, Slack, type LucideIcon } from 'lucide-react'
+import { Mail, MessageSquare, Bell, Globe, Webhook, MessageCircle, type LucideIcon } from 'lucide-react'
 import type { Channel } from '@/types'
 import { cn } from '@/lib/utils'
 
@@ -14,7 +14,7 @@ const channelIcons: Record<Channel, LucideIcon> = {
   push:      Bell,
   websocket: Globe,
   webhook:   Webhook,
-  slack:     Slack,
+  slack:     MessageCircle,
 }
 
 const channelColors: Record<Channel, string> = {

@@ -1,0 +1,208 @@
+[
+	{
+		"eventId": 1,
+		"timestamp": "2026-04-24T07:00:05.721Z",
+		"eventType": "WorkflowExecutionStarted",
+		"workflowType": {
+			"name": "github.com/spidey/notification-service/internal/workflow.NotificationWorkflowCadence"
+		},
+		"taskList": {
+			"kind": null,
+			"name": "notification-default"
+		},
+		"input": [
+			{
+				"ID": "60e7221e-dbb5-489c-b2b6-2428b060dc70",
+				"UserID": "00000000-0000-0000-0000-000000000000",
+				"Channel": "email",
+				"Recipient": "karthikeyan@appointy.com",
+				"Type": "test",
+				"TemplateID": null,
+				"TemplateVariables": null,
+				"IdempotencyKey": "test:ses:2240112392:email",
+				"ForcedVendor": "ses"
+			}
+		],
+		"lastCompletionResult": null,
+		"executionStartToCloseTimeoutSeconds": 600,
+		"taskStartToCloseTimeoutSeconds": 10,
+		"firstDecisionTaskBackoffSeconds": 0,
+		"attempt": null,
+		"continuedExecutionRunId": null,
+		"continuedFailureDetails": null,
+		"continuedFailureReason": null,
+		"cronSchedule": null,
+		"expirationTimestamp": null,
+		"firstExecutionRunId": "d28442ec-8bd4-457a-b775-2eef3a588054",
+		"firstScheduledTimeNano": null,
+		"originalExecutionRunId": "d28442ec-8bd4-457a-b775-2eef3a588054",
+		"parentInitiatedEventId": null,
+		"parentWorkflowDomain": null,
+		"parentWorkflowExecution": null,
+		"retryPolicy": null,
+		"identity": "6718@spideys-MacBook-Air.local@@c49905ce-6109-429e-b838-53a51eff380f",
+		"initiator": null,
+		"header": {
+			"fields": {}
+		},
+		"memo": null,
+		"searchAttributes": null,
+		"prevAutoResetPoints": null,
+		"partitionConfig": {},
+		"requestId": "dbe3090f-2ec6-40da-a34a-773e760811b8",
+		"cronOverlapPolicy": "CRON_OVERLAP_POLICY_SKIPPED",
+		"activeClusterSelectionPolicy": {
+			"strategy": "ACTIVE_CLUSTER_SELECTION_STRATEGY_REGION_STICKY",
+			"strategyConfig": "activeClusterStickyRegionConfig",
+			"activeClusterStickyRegionConfig": {
+				"stickyRegion": ""
+			}
+		},
+		"version": "0",
+		"taskId": "39845980"
+	},
+	{
+		"eventId": 2,
+		"timestamp": "2026-04-24T07:00:05.721Z",
+		"eventType": "DecisionTaskScheduled",
+		"taskList": {
+			"kind": null,
+			"name": "notification-default"
+		},
+		"startToCloseTimeoutSeconds": 10,
+		"attempt": 0,
+		"version": "0",
+		"taskId": "39845981"
+	},
+	{
+		"eventId": 3,
+		"timestamp": "2026-04-24T07:00:07.526Z",
+		"eventType": "DecisionTaskStarted",
+		"identity": "6717@spideys-MacBook-Air.local@notification-default@4d738bfe-9d5b-4faf-b95f-e5247894956f",
+		"scheduledEventId": 2,
+		"requestId": "e3380cd6-86a8-4583-b5b2-111f56c1fed0",
+		"version": "0",
+		"taskId": "39845986"
+	},
+	{
+		"eventId": 4,
+		"timestamp": "2026-04-24T07:00:08.548Z",
+		"eventType": "DecisionTaskCompleted",
+		"identity": "6717@spideys-MacBook-Air.local@notification-default@4d738bfe-9d5b-4faf-b95f-e5247894956f",
+		"binaryChecksum": "127582a2edec6debf7626ddb665ddb65",
+		"executionContext": null,
+		"scheduledEventId": "2",
+		"startedEventId": "3",
+		"version": "0",
+		"taskId": "39845989"
+	},
+	{
+		"eventId": 5,
+		"timestamp": "2026-04-24T07:00:08.549Z",
+		"eventType": "ActivityTaskScheduled",
+		"activityId": "0",
+		"activityType": {
+			"name": "CheckPreferencesActivity"
+		},
+		"taskList": {
+			"kind": null,
+			"name": "notification-default"
+		},
+		"input": [
+			{
+				"ID": "60e7221e-dbb5-489c-b2b6-2428b060dc70",
+				"UserID": "00000000-0000-0000-0000-000000000000",
+				"Channel": "email",
+				"Recipient": "karthikeyan@appointy.com",
+				"Type": "test",
+				"TemplateID": null,
+				"TemplateVariables": null,
+				"IdempotencyKey": "test:ses:2240112392:email",
+				"ForcedVendor": "ses"
+			}
+		],
+		"heartbeatTimeoutSeconds": 0,
+		"retryPolicy": null,
+		"scheduleToCloseTimeoutSeconds": 30,
+		"scheduleToStartTimeoutSeconds": 30,
+		"startToCloseTimeoutSeconds": 30,
+		"domain": null,
+		"decisionTaskCompletedEventId": 4,
+		"header": {
+			"fields": {}
+		},
+		"version": "0",
+		"taskId": "39845990"
+	},
+	{
+		"eventId": 6,
+		"timestamp": "2026-04-24T07:00:08.549Z",
+		"eventType": "ActivityTaskStarted",
+		"lastFailureDetails": null,
+		"lastFailureReason": null,
+		"attempt": 0,
+		"identity": "6717@spideys-MacBook-Air.local@notification-default@4d738bfe-9d5b-4faf-b95f-e5247894956f",
+		"scheduledEventId": 5,
+		"requestId": "7263f6bd-4fde-47de-b464-d7c1090518fd",
+		"version": "0",
+		"taskId": "39845991"
+	},
+	{
+		"eventId": 7,
+		"timestamp": "2026-04-24T07:00:38.754Z",
+		"eventType": "ActivityTaskTimedOut",
+		"timeoutType": "ScheduleToClose",
+		"details": null,
+		"lastFailureDetails": null,
+		"lastFailureReason": null,
+		"scheduledEventId": 5,
+		"startedEventId": 6,
+		"version": "0",
+		"taskId": "39845995"
+	},
+	{
+		"eventId": 8,
+		"timestamp": "2026-04-24T07:00:38.794Z",
+		"eventType": "DecisionTaskScheduled",
+		"taskList": {
+			"kind": null,
+			"name": "spideys-MacBook-Air.local:4a69e76d-3fa5-488e-be44-e826a5c8884c"
+		},
+		"startToCloseTimeoutSeconds": 10,
+		"attempt": 0,
+		"version": "0",
+		"taskId": "39845997"
+	},
+	{
+		"eventId": 9,
+		"timestamp": "2026-04-24T07:00:39.656Z",
+		"eventType": "DecisionTaskStarted",
+		"identity": "6717@spideys-MacBook-Air.local@notification-default@4d738bfe-9d5b-4faf-b95f-e5247894956f",
+		"scheduledEventId": 8,
+		"requestId": "f9c38a7e-01cc-4ea0-aeaa-0b3ffcb8b137",
+		"version": "0",
+		"taskId": "39846001"
+	},
+	{
+		"eventId": 10,
+		"timestamp": "2026-04-24T07:00:39.869Z",
+		"eventType": "DecisionTaskCompleted",
+		"identity": "6717@spideys-MacBook-Air.local@notification-default@4d738bfe-9d5b-4faf-b95f-e5247894956f",
+		"binaryChecksum": "127582a2edec6debf7626ddb665ddb65",
+		"executionContext": null,
+		"scheduledEventId": "8",
+		"startedEventId": "9",
+		"version": "0",
+		"taskId": "39846004"
+	},
+	{
+		"eventId": 11,
+		"timestamp": "2026-04-24T07:00:39.869Z",
+		"eventType": "WorkflowExecutionFailed",
+		"reason": "cadenceInternal:Timeout SCHEDULE_TO_CLOSE",
+		"details": null,
+		"decisionTaskCompletedEventId": 10,
+		"version": "0",
+		"taskId": "39846005"
+	}
+]

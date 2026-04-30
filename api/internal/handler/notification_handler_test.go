@@ -15,7 +15,7 @@ func TestNotificationHandler_Send_Validation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	deps := handler.Dependencies{
-		NotificationHandler: handler.NewNotificationHandler(nil, nil, nil),
+		NotificationHandler: handler.NewNotificationHandler(nil, nil, nil, nil),
 		Config: &config.Config{},
 	}
 	// We just test the router bindings manually or directly call the handler function.

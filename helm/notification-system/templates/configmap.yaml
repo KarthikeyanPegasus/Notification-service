@@ -9,4 +9,11 @@ data:
   NS_PUBSUB_MODE: {{ .Values.config.pubsubMode | quote }}
   NS_SERVER_PORT: {{ .Values.config.serverPort | quote }}
   NS_DATABASE_MIGRATION_DIR: {{ .Values.config.migrationDir | quote }}
-  NS_PROVIDERS_WEBHOOK_SIGNING_SECRET: {{ .Values.config.webhookSigningSecret | quote }}
+  NS_CADENCE_MODE: {{ .Values.config.cadence.mode | quote }}
+  NS_CADENCE_HOST_PORT: {{ .Values.config.cadence.hostPort | quote }}
+  NS_CADENCE_DOMAIN: {{ .Values.config.cadence.domain | quote }}
+  {{- with .Values.config.extra }}
+  {{- range $key, $val := . }}
+  {{ $key }}: {{ $val | quote }}
+  {{- end }}
+  {{- end }}

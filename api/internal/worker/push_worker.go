@@ -32,13 +32,22 @@ func NewPushWorker(
 	notifRepo *repository.NotificationRepository,
 	attemptRepo *repository.AttemptRepository,
 	eventRepo *repository.EventRepository,
+	govRepo *repository.GovernanceRepository,
+	vendorRepo nsconfig.Repository,
+	cfg *nsconfig.Config,
 	registry *circuit.Registry,
 	log *zap.Logger,
+	opts ...WorkerOptions,
 ) *PushWorker {
+	priority := domain.PriorityLow
+	if len(opts) > 0 && opts[0].Priority != "" {
+		priority = opts[0].Priority
+	}
+	subKey := pubsub.PriorityTopicKey(string(domain.ChannelPush), string(priority))
 	return &PushWorker{
 		base: newBaseWorker(
-			domain.ChannelPush, "push-worker-sub",
-			subscriber, notifRepo, attemptRepo, eventRepo, registry, log,
+			domain.ChannelPush, subKey,
+			subscriber, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
 		),
 		senders: senders,
 	}
@@ -47,11 +56,28 @@ func NewPushWorker(
 func (w *PushWorker) Channel() domain.Channel { return domain.ChannelPush }
 
 func (w *PushWorker) Start(ctx context.Context) error {
-	w.base.log.Info("push worker started")
-	return w.base.subscriber.Subscribe(ctx, "push", func(ctx context.Context, msg *pubsub.Message) error {
+	w.base.log.Info("push worker started",
+		zap.String("priority", string(w.base.priority)),
+		zap.String("subscription", w.base.subscription),
+	)
+	return w.base.subscriber.Subscribe(ctx, w.base.subscription, func(ctx context.Context, msg *pubsub.Message) error {
 		w.mu.RLock()
 		routing := w.routing
 		w.mu.RUnlock()
+
+		if msg.ForcedVendor != "" {
+			return w.base.dispatch(ctx, msg, func(ctx context.Context, n *domain.Notification) (domain.DeliveryResult, error) {
+				w.mu.RLock()
+				senders := w.senders
+				w.mu.RUnlock()
+				for _, s := range senders {
+					if s.ProviderName() == msg.ForcedVendor {
+						return s.Send(ctx, n)
+					}
+				}
+				return domain.DeliveryResult{}, fmt.Errorf("forced vendor %q not configured for push channel", msg.ForcedVendor)
+			}, msg.ForcedVendor)
+		}
 		if normalizeRoutingMode(routing.Mode) == "publish_all" {
 			w.mu.RLock()
 			senders := append([]provider.Sender(nil), w.senders...)
@@ -61,10 +87,18 @@ func (w *PushWorker) Start(ctx context.Context) error {
 		}
 
 		return w.base.dispatch(ctx, msg, func(ctx context.Context, n *domain.Notification) (domain.DeliveryResult, error) {
+			effectiveCfg := w.base.getEffectiveConfig(ctx, n.APIKeyID)
+
 			w.mu.RLock()
 			senders := append([]provider.Sender(nil), w.senders...)
 			routing := w.routing
 			w.mu.RUnlock()
+
+			// If we have a scoped config, use it to initialize senders/routing
+			if effectiveCfg != w.base.cfg {
+				senders = provider.InitializePushSenders(effectiveCfg.Providers.Push)
+				routing = effectiveCfg.Providers.PushRouting
+			}
 
 			senders = stableVendors(senders)
 			mode := normalizeRoutingMode(routing.Mode)
@@ -131,18 +165,24 @@ func (w *PushWorker) Start(ctx context.Context) error {
 				if prefer != "" || routing.Fallback != "" {
 					fallback := routing.Fallback
 					ordered := make([]provider.Sender, 0, len(senders))
+					preferFallback := shouldPreferFallback(w.base.registry, prefer, routing)
+					first := prefer
+					second := fallback
+					if preferFallback && fallback != "" {
+						first, second = fallback, prefer
+					}
 					for _, s := range senders {
-						if prefer != "" && s.ProviderName() == prefer {
+						if first != "" && s.ProviderName() == first {
 							ordered = append(ordered, s)
 						}
 					}
 					for _, s := range senders {
-						if fallback != "" && s.ProviderName() == fallback && s.ProviderName() != prefer {
+						if second != "" && s.ProviderName() == second && s.ProviderName() != first {
 							ordered = append(ordered, s)
 						}
 					}
 					for _, s := range senders {
-						if s.ProviderName() != prefer && s.ProviderName() != fallback {
+						if s.ProviderName() != first && s.ProviderName() != second {
 							ordered = append(ordered, s)
 						}
 					}

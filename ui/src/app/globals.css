@@ -26,25 +26,26 @@
     --radius: 0.5rem;
   }
   .dark {
-    --background: 222.2 84% 4.9%;
+    /* Tokyo-night inspired dark palette */
+    --background: 231 25% 11%;
     --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
+    --card: 231 23% 14%;
     --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
+    --popover: 231 23% 14%;
     --popover-foreground: 210 40% 98%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
+    --primary: 197 90% 64%;
+    --primary-foreground: 231 25% 11%;
+    --secondary: 232 18% 18%;
     --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
+    --muted: 232 18% 18%;
+    --muted-foreground: 225 14% 72%;
+    --accent: 259 85% 70%;
+    --accent-foreground: 231 25% 11%;
+    --destructive: 0 70% 45%;
     --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
+    --border: 231 18% 20%;
+    --input: 231 18% 20%;
+    --ring: 197 90% 64%;
   }
 }
 

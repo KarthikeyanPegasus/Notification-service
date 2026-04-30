@@ -9,9 +9,31 @@ import (
 type SuppressionType string
 
 const (
-	SuppressionTypeEmail SuppressionType = "email"
-	SuppressionTypeSMS   SuppressionType = "sms"
+	SuppressionTypeEmail   SuppressionType = "email"
+	SuppressionTypeSMS     SuppressionType = "sms"
+	SuppressionTypePush    SuppressionType = "push"
+	SuppressionTypeSlack   SuppressionType = "slack"
+	SuppressionTypeWebhook SuppressionType = "webhook"
 )
+
+// SuppressionTypeForChannel returns the suppression type that applies to a given channel.
+// Returns an empty string for channels that use opt-out rather than identifier suppression.
+func SuppressionTypeForChannel(ch Channel) SuppressionType {
+	switch ch {
+	case ChannelEmail:
+		return SuppressionTypeEmail
+	case ChannelSMS:
+		return SuppressionTypeSMS
+	case ChannelPush:
+		return SuppressionTypePush
+	case ChannelSlack:
+		return SuppressionTypeSlack
+	case ChannelWebhook:
+		return SuppressionTypeWebhook
+	default:
+		return ""
+	}
+}
 
 type Suppression struct {
 	ID        uuid.UUID       `json:"id" db:"id"`

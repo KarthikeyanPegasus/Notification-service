@@ -56,7 +56,16 @@ func (r *GovernanceRepository) DeleteSuppression(ctx context.Context, id uuid.UU
 
 func (r *GovernanceRepository) IsSuppressed(ctx context.Context, stype domain.SuppressionType, value string) (bool, error) {
 	var exists bool
-	query := `SELECT EXISTS(SELECT 1 FROM suppressions WHERE type = $1 AND value = $2)`
+	// Support wildcard matching for domains (email) and prefixes (sms)
+	const query = `
+		SELECT EXISTS(
+			SELECT 1 FROM suppressions 
+			WHERE type = $1 AND (
+				value = $2 OR 
+				($1 = 'email' AND $2 LIKE '%@' || value) OR
+				($1 = 'sms' AND $2 LIKE value || '%')
+			)
+		)`
 	err := r.db.Pool.QueryRow(ctx, query, stype, value).Scan(&exists)
 	return exists, err
 }

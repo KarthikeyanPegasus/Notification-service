@@ -24,7 +24,7 @@ func main() {
 	ctx := context.Background()
 	client := notification.New(
 		notification.WithBaseURL("http://localhost:8080/v1"),
-		notification.WithBearerToken("<jwt>"),
+		notification.WithAPIKey("<api-key>"),
 	)
 
 	_, err := client.Notifications.NotifyBySlack(ctx,
@@ -37,6 +37,34 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+```
+
+## Pub/Sub ingress (publish events instead of HTTP)
+
+If your deployment runs the ingress subscriber (see worker `EventWorker`), you can publish a `SendRequest`
+JSON directly to the ingress topic (default `notifications-ingress`).
+
+```go
+pub, err := notification.NewIngressPublisher(ctx, "<gcp-project-id>",
+  notification.WithIngressTopic("notifications-ingress"),
+  notification.WithCredentialsJSONRaw([]byte(`{...service account json...}`)),
+)
+if err != nil {
+  log.Fatal(err)
+}
+defer pub.Close()
+
+_, err = pub.Publish(ctx, &notification.SendRequest{
+  IdempotencyKey: "evt-1",
+  UserID: "550e8400-e29b-4142-a273-041772000000",
+  Channels: []notification.Channel{notification.ChannelSMS},
+  Type: "transactional",
+  Recipient: "+15555550123",
+  Body: "Hello from Pub/Sub",
+})
+if err != nil {
+  log.Fatal(err)
 }
 ```
 

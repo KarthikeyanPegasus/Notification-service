@@ -69,6 +69,17 @@ func TestVendorIntegration(t *testing.T) {
 			},
 		},
 		{
+			name:      "MessageBird SMS",
+			channel:   domain.ChannelSMS,
+			recipient: os.Getenv("TEST_SMS_RECIPIENT"),
+			getSender: func() (interface{}, error) {
+				if cfg.Providers.SMS.MessageBird.AccessKey == "" {
+					return nil, nil
+				}
+				return sms.NewMessageBirdSender(cfg.Providers.SMS.MessageBird), nil
+			},
+		},
+		{
 			name:      "Amazon SES Email",
 			channel:   domain.ChannelEmail,
 			recipient: os.Getenv("TEST_EMAIL_RECIPIENT"),
@@ -91,6 +102,28 @@ func TestVendorIntegration(t *testing.T) {
 			},
 		},
 		{
+			name:      "SendGrid Email",
+			channel:   domain.ChannelEmail,
+			recipient: os.Getenv("TEST_EMAIL_RECIPIENT"),
+			getSender: func() (interface{}, error) {
+				if cfg.Providers.Email.SendGrid.APIKey == "" {
+					return nil, nil
+				}
+				return email.NewSendGridSender(cfg.Providers.Email.SendGrid), nil
+			},
+		},
+		{
+			name:      "Postmark Email",
+			channel:   domain.ChannelEmail,
+			recipient: os.Getenv("TEST_EMAIL_RECIPIENT"),
+			getSender: func() (interface{}, error) {
+				if cfg.Providers.Email.Postmark.ServerToken == "" {
+					return nil, nil
+				}
+				return email.NewPostmarkSender(cfg.Providers.Email.Postmark), nil
+			},
+		},
+		{
 			name:      "SMTP Email (Mailhog)",
 			channel:   domain.ChannelEmail,
 			recipient: os.Getenv("TEST_EMAIL_RECIPIENT"),
@@ -110,6 +143,28 @@ func TestVendorIntegration(t *testing.T) {
 					return nil, nil
 				}
 				return push.NewFCMSender(cfg.Providers.Push.FCM.ServiceAccountJSON)
+			},
+		},
+		{
+			name:      "OneSignal Push",
+			channel:   domain.ChannelPush,
+			recipient: os.Getenv("TEST_ONESIGNAL_EXTERNAL_USER_ID"),
+			getSender: func() (interface{}, error) {
+				if cfg.Providers.Push.OneSignal.RestAPIKey == "" {
+					return nil, nil
+				}
+				return push.NewOneSignalSender(cfg.Providers.Push.OneSignal), nil
+			},
+		},
+		{
+			name:      "Pusher Beams Push",
+			channel:   domain.ChannelPush,
+			recipient: os.Getenv("TEST_PUSHER_INTEREST"),
+			getSender: func() (interface{}, error) {
+				if cfg.Providers.Push.Pusher.InstanceID == "" {
+					return nil, nil
+				}
+				return push.NewPusherBeamsSender(cfg.Providers.Push.Pusher), nil
 			},
 		},
 	}

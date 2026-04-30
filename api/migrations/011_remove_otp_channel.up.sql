@@ -10,7 +10,9 @@ DECLARE
 BEGIN
     SELECT conname INTO constraint_name
     FROM pg_constraint
-    WHERE conrelid = 'notifications'::regclass AND contype = 'c' AND consrc LIKE '%otp%';
+    WHERE conrelid = 'notifications'::regclass
+      AND contype = 'c'
+      AND pg_get_constraintdef(oid) ILIKE '%otp%';
     
     IF constraint_name IS NOT NULL THEN
         EXECUTE 'ALTER TABLE notifications DROP CONSTRAINT ' || constraint_name;

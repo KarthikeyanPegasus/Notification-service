@@ -101,10 +101,54 @@ func (s *PlivoSender) Send(ctx context.Context, n *domain.Notification) (domain.
 	}, nil
 }
 
+// GetStatus polls the Plivo Messages API for delivery status.
 func (s *PlivoSender) GetStatus(ctx context.Context, providerMsgID string) (domain.DeliveryResult, error) {
+	if s.authID == "" || providerMsgID == "" {
+		return domain.DeliveryResult{
+			Provider:      s.ProviderName(),
+			ProviderMsgID: providerMsgID,
+			ErrorMessage:  "plivo not configured for status polling",
+		}, nil
+	}
+
+	apiURL := fmt.Sprintf("%s/Account/%s/Message/%s/", plivoAPIBase, s.authID, providerMsgID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return domain.DeliveryResult{Provider: s.ProviderName(), ProviderMsgID: providerMsgID}, err
+	}
+	req.SetBasicAuth(s.authID, s.authToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return domain.DeliveryResult{Provider: s.ProviderName(), ProviderMsgID: providerMsgID}, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode >= 400 {
+		return domain.DeliveryResult{
+			Provider:      s.ProviderName(),
+			ProviderMsgID: providerMsgID,
+			ErrorCode:     fmt.Sprintf("HTTP_%d", resp.StatusCode),
+			ErrorMessage:  string(body),
+		}, fmt.Errorf("plivo returned HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		MessageState string `json:"message_state"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return domain.DeliveryResult{Provider: s.ProviderName(), ProviderMsgID: providerMsgID, ErrorMessage: err.Error()}, err
+	}
+
+	state := result.MessageState
+	success := state == "delivered" || state == "sent"
+
 	return domain.DeliveryResult{
+		Success:       success,
 		Provider:      s.ProviderName(),
 		ProviderMsgID: providerMsgID,
-		ErrorMessage:  "status polling not supported for plivo",
+		VendorStatus:  state,
 	}, nil
 }

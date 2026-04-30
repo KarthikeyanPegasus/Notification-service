@@ -49,13 +49,14 @@ func PriorityFor(channel Channel, notifType string) Priority {
 type NotificationStatus string
 
 const (
-	StatusPending   NotificationStatus = "pending"
-	StatusQueued    NotificationStatus = "queued"
-	StatusSent      NotificationStatus = "sent"
-	StatusDelivered NotificationStatus = "delivered"
-	StatusFailed    NotificationStatus = "failed"
-	StatusCancelled NotificationStatus = "cancelled"
-	StatusBounced   NotificationStatus = "bounced"
+	StatusPending    NotificationStatus = "pending"
+	StatusQueued     NotificationStatus = "queued"
+	StatusSent       NotificationStatus = "sent"
+	StatusDelivered  NotificationStatus = "delivered"
+	StatusFailed     NotificationStatus = "failed"
+	StatusCancelled  NotificationStatus = "cancelled"
+	StatusBounced    NotificationStatus = "bounced"
+	StatusSuppressed NotificationStatus = "suppressed"
 )
 
 // AttemptStatus tracks individual provider call outcomes.
@@ -72,21 +73,24 @@ const (
 type EventType string
 
 const (
-	EventQueued    EventType = "queued"
-	EventSent      EventType = "sent"
-	EventDelivered EventType = "delivered"
-	EventFailed    EventType = "failed"
-	EventBounced   EventType = "bounced"
-	EventClicked   EventType = "clicked"
-	EventOpened    EventType = "opened"
-	EventCancelled EventType = "cancelled"
+	EventQueued     EventType = "queued"
+	EventSent       EventType = "sent"
+	EventDelivered  EventType = "delivered"
+	EventFailed     EventType = "failed"
+	EventBounced    EventType = "bounced"
+	EventClicked    EventType = "clicked"
+	EventOpened     EventType = "opened"
+	EventCancelled  EventType = "cancelled"
+	EventSuppressed EventType = "suppressed"
+	EventOptedOut   EventType = "opted_out"
+	EventComplained EventType = "complained"
 )
 
 // Notification is the core aggregate root.
 type Notification struct {
 	ID              uuid.UUID          `json:"id" db:"id"`
 	IdempotencyKey  string             `json:"idempotency_key" db:"idempotency_key"`
-	UserID          uuid.UUID          `json:"user_id" db:"user_id"`
+	UserID          *uuid.UUID         `json:"user_id,omitempty" db:"user_id"`
 	Channel         Channel            `json:"channel" db:"channel"`
 	Priority        Priority           `json:"priority" db:"priority"`
 	Type            string             `json:"type" db:"type"`
@@ -97,58 +101,63 @@ type Notification struct {
 	ScheduledAt     *time.Time         `json:"scheduled_at,omitempty" db:"scheduled_at"`
 	SentAt          *time.Time         `json:"sent_at,omitempty" db:"sent_at"`
 	DeliveredAt     *time.Time         `json:"delivered_at,omitempty" db:"delivered_at"`
+	APIKeyID        *uuid.UUID         `json:"api_key_id,omitempty" db:"api_key_id"`
 	Source          string             `json:"source" db:"source"`
+	Provider        string             `json:"provider"`
+	ForcedVendor    string             `json:"forced_vendor,omitempty" db:"forced_vendor"`
+	ClientName      string             `json:"client_name"`
 	CreatedAt       time.Time          `json:"created_at" db:"created_at"`
 	UpdatedAt       time.Time          `json:"updated_at" db:"updated_at"`
 }
 
 // RenderedContent holds the channel-rendered message payload.
 type RenderedContent struct {
-	Subject  string            `json:"subject,omitempty"`
-	Body     string            `json:"body"`
-	HTML     string            `json:"html,omitempty"`
-	Data     map[string]string `json:"data,omitempty"`
+	Subject string            `json:"subject,omitempty"`
+	Body    string            `json:"body"`
+	HTML    string            `json:"html,omitempty"`
+	Data    map[string]string `json:"data,omitempty"`
 }
 
 // NotificationAttempt records each provider delivery attempt.
 type NotificationAttempt struct {
-	ID              uuid.UUID     `json:"id" db:"id"`
-	NotificationID  uuid.UUID     `json:"notification_id" db:"notification_id"`
-	AttemptNumber   int           `json:"attempt_number" db:"attempt_number"`
-	Status          AttemptStatus `json:"status" db:"status"`
-	Provider        string        `json:"provider" db:"provider"`
-	ProviderMsgID   *string       `json:"provider_msg_id,omitempty" db:"provider_msg_id"`
-	ErrorCode       *string       `json:"error_code,omitempty" db:"error_code"`
-	ErrorMessage    *string       `json:"error_message,omitempty" db:"error_message"`
-	LatencyMs       *int          `json:"latency_ms,omitempty" db:"latency_ms"`
-	CreatedAt       time.Time     `json:"created_at" db:"created_at"`
+	ID             uuid.UUID     `json:"id" db:"id"`
+	NotificationID uuid.UUID     `json:"notification_id" db:"notification_id"`
+	AttemptNumber  int           `json:"attempt_number" db:"attempt_number"`
+	Status         AttemptStatus `json:"status" db:"status"`
+	Provider       string        `json:"provider" db:"provider"`
+	ProviderMsgID  *string       `json:"provider_msg_id,omitempty" db:"provider_msg_id"`
+	ErrorCode      *string       `json:"error_code,omitempty" db:"error_code"`
+	ErrorMessage   *string       `json:"error_message,omitempty" db:"error_message"`
+	LatencyMs      *int          `json:"latency_ms,omitempty" db:"latency_ms"`
+	CreatedAt      time.Time     `json:"created_at" db:"created_at"`
 }
 
 // NotificationEvent is an immutable timeline entry.
 type NotificationEvent struct {
-	ID             uuid.UUID `json:"id" db:"id"`
-	NotificationID uuid.UUID `json:"notification_id" db:"notification_id"`
-	EventType      EventType `json:"event_type" db:"event_type"`
+	ID             uuid.UUID      `json:"id" db:"id"`
+	NotificationID uuid.UUID      `json:"notification_id" db:"notification_id"`
+	EventType      EventType      `json:"event_type" db:"event_type"`
 	Metadata       map[string]any `json:"metadata,omitempty" db:"metadata"`
-	CreatedAt      time.Time `json:"created_at" db:"created_at"`
+	CreatedAt      time.Time      `json:"created_at" db:"created_at"`
 }
 
 // ScheduledNotification is the authoritative state for future delivery.
 type ScheduledNotification struct {
-	ID                uuid.UUID          `json:"id" db:"id"`
-	NotificationID    uuid.UUID          `json:"notification_id" db:"notification_id"`
-	UserID            uuid.UUID          `json:"user_id" db:"user_id"`
-	Channel           Channel            `json:"channel" db:"channel"`
-	TemplateID        *uuid.UUID         `json:"template_id,omitempty" db:"template_id"`
-	TemplateVars      map[string]string  `json:"template_vars,omitempty" db:"template_vars"`
-	ScheduledAt       time.Time          `json:"scheduled_at" db:"scheduled_at"`
-	OriginalAt        time.Time          `json:"original_at" db:"original_at"`
-	WorkflowID        string             `json:"workflow_id" db:"cadence_workflow_id"`
-	RunID             string             `json:"run_id" db:"cadence_run_id"`
-	Status            NotificationStatus `json:"status" db:"status"`
-	RescheduleCount   int                `json:"reschedule_count" db:"reschedule_count"`
-	CreatedAt         time.Time          `json:"created_at" db:"created_at"`
-	UpdatedAt         time.Time          `json:"updated_at" db:"updated_at"`
+	ID              uuid.UUID          `json:"id" db:"id"`
+	NotificationID  uuid.UUID          `json:"notification_id" db:"notification_id"`
+	Channel         Channel            `json:"channel" db:"channel"`
+	TemplateID      *uuid.UUID         `json:"template_id,omitempty" db:"template_id"`
+	TemplateVars    map[string]string  `json:"template_vars,omitempty" db:"template_vars"`
+	ScheduledAt     time.Time          `json:"scheduled_at" db:"scheduled_at"`
+	OriginalAt      time.Time          `json:"original_at" db:"original_at"`
+	WorkflowID      string             `json:"workflow_id" db:"cadence_workflow_id"`
+	RunID           string             `json:"run_id" db:"cadence_run_id"`
+	Status          NotificationStatus `json:"status" db:"status"`
+	RescheduleCount int                `json:"reschedule_count" db:"reschedule_count"`
+	// APIKeyID is the client whose workflow orchestration config is used for this schedule.
+	APIKeyID        *uuid.UUID         `json:"api_key_id,omitempty" db:"api_key_id"`
+	CreatedAt       time.Time          `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at" db:"updated_at"`
 }
 
 // NotificationTemplate holds parameterised message templates.
@@ -176,25 +185,25 @@ type ProviderWebhookEvent struct {
 
 // DeviceToken maps users to push device registrations.
 type DeviceToken struct {
-	ID         uuid.UUID `json:"id" db:"id"`
-	UserID     uuid.UUID `json:"user_id" db:"user_id"`
-	Token      string    `json:"token" db:"token"`
-	Platform   string    `json:"platform" db:"platform"` // ios | android | web
-	AppVersion *string   `json:"app_version,omitempty" db:"app_version"`
-	IsActive   bool      `json:"is_active" db:"is_active"`
-	CreatedAt  time.Time `json:"created_at" db:"created_at"`
+	ID         uuid.UUID  `json:"id" db:"id"`
+	UserID     uuid.UUID  `json:"user_id" db:"user_id"`
+	Token      string     `json:"token" db:"token"`
+	Platform   string     `json:"platform" db:"platform"` // ios | android | web
+	AppVersion *string    `json:"app_version,omitempty" db:"app_version"`
+	IsActive   bool       `json:"is_active" db:"is_active"`
+	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty" db:"last_seen_at"`
 }
 
 // UserPreferences governs per-user channel opt-ins and DND windows.
 type UserPreferences struct {
-	UserID          string             `json:"user_id"`
-	Channels        map[Channel]bool   `json:"channels"`
-	DoNotDisturb    *DNDWindow         `json:"do_not_disturb,omitempty"`
-	FrequencyCaps   map[string]int     `json:"frequency_caps,omitempty"`
+	UserID            string           `json:"user_id"`
+	Channels          map[Channel]bool `json:"channels"`
+	DoNotDisturb      *DNDWindow       `json:"do_not_disturb,omitempty"`
+	FrequencyCaps     map[string]int   `json:"frequency_caps,omitempty"`
 	UnsubscribedTypes []string         `json:"unsubscribed_types,omitempty"`
-	IsSuppressed    bool               `json:"is_suppressed,omitempty"`
-	UpdatedAt       time.Time          `json:"updated_at"`
+	IsSuppressed      bool             `json:"is_suppressed,omitempty"`
+	UpdatedAt         time.Time        `json:"updated_at"`
 }
 
 // DNDWindow defines quiet hours.
@@ -218,22 +227,38 @@ func (p *UserPreferences) IsChannelEnabled(ch Channel) bool {
 
 // SendRequest is the API-facing input for a notification send.
 type SendRequest struct {
-	IdempotencyKey    string            `json:"idempotency_key" validate:"required,max=128"`
-	UserID            string            `json:"user_id" validate:"required,uuid4"`
-	Channels          []Channel         `json:"channels" validate:"required,min=1,dive,oneof=email sms push websocket webhook slack"`
-	Type              string            `json:"type" validate:"required,max=50"`
-	TemplateID        *string           `json:"template_id,omitempty" validate:"omitempty,uuid4"`
-	// Body is optional plain text / template string for channels that are not address-based (e.g. Slack message text).
-	Body              string            `json:"body,omitempty" validate:"omitempty,max=50000"`
+	IdempotencyKey string    `json:"idempotency_key" validate:"required,max=128"`
+	UserID         string    `json:"user_id,omitempty"`
+	Channels       []Channel `json:"channels" validate:"required,min=1,dive,oneof=email sms push websocket webhook slack"`
+	Type           string    `json:"type" validate:"required,max=50"`
+	TemplateID     *string   `json:"template_id,omitempty" validate:"omitempty,uuid4"`
+	// Subject is optional for channels that support it (e.g. Email).
+	Subject string `json:"subject,omitempty" validate:"omitempty,max=255"`
+	// Body is optional plain text / template string. Use for SMS, Slack, or as text fallback for Email.
+	Body string `json:"body,omitempty" validate:"omitempty,max=50000"`
+	// HTML is optional for channels that support it (e.g. Email).
+	HTML string `json:"html,omitempty" validate:"omitempty,max=100000"`
 	TemplateVariables map[string]string `json:"template_variables,omitempty"`
 	ScheduledAt       *time.Time        `json:"scheduled_at,omitempty"`
+	// ClientID selects which registered API key's workflow orchestration config to use for scheduling.
+	// When set, the workflow engine configured for that client (Temporal/Cadence endpoint) is used.
+	// If omitted, the engine for the calling API key is used.
+	ClientID          *string           `json:"client_id,omitempty" validate:"omitempty,uuid4"`
 	Recipient         string            `json:"recipient,omitempty"`
+	// SlackChannel targets a configured Slack channel name (resolved to a webhook URL via vendor config).
+	// If set, it overrides Recipient for the Slack channel.
+	SlackChannel      string            `json:"slack_channel,omitempty" validate:"omitempty,max=80"`
+	// ForcedVendor allows bypassing routing to test a specific provider.
+	ForcedVendor      string            `json:"forced_vendor,omitempty" validate:"omitempty,max=50"`
 }
 
 // BulkSendRequest fans a notification out to a user segment.
 type BulkSendRequest struct {
 	Type              string            `json:"type" validate:"required"`
-	TemplateID        string            `json:"template_id" validate:"required,uuid4"`
+	TemplateID        *string           `json:"template_id,omitempty" validate:"omitempty,uuid4"`
+	Subject           string            `json:"subject,omitempty" validate:"omitempty,max=255"`
+	Body              string            `json:"body,omitempty" validate:"omitempty,max=50000"`
+	HTML              string            `json:"html,omitempty" validate:"omitempty,max=100000"`
 	TemplateVariables map[string]string `json:"template_variables,omitempty"`
 	UserSegment       map[string]any    `json:"user_segment" validate:"required"`
 	Channels          []Channel         `json:"channels" validate:"required,min=1,dive,oneof=email sms push websocket webhook slack"`
@@ -262,11 +287,11 @@ type RescheduleRequest struct {
 
 // UpdatePreferencesRequest updates user channel preferences.
 type UpdatePreferencesRequest struct {
-	Channels     map[Channel]bool   `json:"channels,omitempty"`
-	DoNotDisturb *DNDWindow         `json:"do_not_disturb,omitempty"`
+	Channels     map[Channel]bool `json:"channels,omitempty"`
+	DoNotDisturb *DNDWindow       `json:"do_not_disturb,omitempty"`
 }
 
-// DeliveryResult is the outcome of a single provider send.
+// DeliveryResult is the outcome of a single provider send or status poll.
 type DeliveryResult struct {
 	Success       bool
 	ProviderMsgID string
@@ -274,6 +299,9 @@ type DeliveryResult struct {
 	LatencyMs     int
 	ErrorCode     string
 	ErrorMessage  string
+	// VendorStatus is the raw status string returned by the provider (e.g. "delivered", "sent", "failed").
+	// Populated by GetStatus() polling; not set by Send().
+	VendorStatus string
 }
 
 func (r DeliveryResult) IsSuccess() bool { return r.Success }

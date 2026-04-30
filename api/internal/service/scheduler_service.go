@@ -9,8 +9,6 @@ import (
 	"github.com/spidey/notification-service/internal/domain"
 	"github.com/spidey/notification-service/internal/repository"
 	"github.com/spidey/notification-service/internal/workflow"
-	"go.temporal.io/api/enums/v1"
-	"go.temporal.io/sdk/client"
 	"go.uber.org/zap"
 )
 
@@ -19,7 +17,7 @@ type SchedulerService struct {
 	schedRepo *repository.ScheduledRepository
 	notifRepo *repository.NotificationRepository
 	eventRepo   *repository.EventRepository
-	temporalCli client.Client
+	wfClients   *WorkflowClientProvider
 	log         *zap.Logger
 }
 
@@ -27,14 +25,14 @@ func NewSchedulerService(
 	schedRepo *repository.ScheduledRepository,
 	notifRepo *repository.NotificationRepository,
 	eventRepo *repository.EventRepository,
-	temporalCli client.Client,
+	wfClients *WorkflowClientProvider,
 	log *zap.Logger,
 ) *SchedulerService {
 	return &SchedulerService{
 		schedRepo:   schedRepo,
 		notifRepo:   notifRepo,
 		eventRepo:   eventRepo,
-		temporalCli: temporalCli,
+		wfClients:   wfClients,
 		log:         log,
 	}
 }
@@ -70,41 +68,76 @@ func (s *SchedulerService) Reschedule(ctx context.Context, notifID uuid.UUID, ne
 		}
 	}
 
+	// Re-start logic requires a full payload so we fetch it.
+	n, err := s.notifRepo.GetByID(ctx, notifID)
+	if err != nil {
+		return nil, fmt.Errorf("loading notification for reschedule: %w", err)
+	}
+
+	// Prefer the client stored on the scheduled record (set at creation time); fall back to the notification's API key.
+	apiKeyID := ""
+	if sched.APIKeyID != nil {
+		apiKeyID = sched.APIKeyID.String()
+	} else if n != nil && n.APIKeyID != nil {
+		apiKeyID = n.APIKeyID.String()
+	}
+	cli, err := s.wfClients.ClientForScope(ctx, &apiKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if cli == nil {
+		return nil, domain.NewAppError(
+			"WORKFLOWS_DISABLED",
+			"rescheduling requires Temporal/Cadence; enable workflow orchestration",
+			400,
+			nil,
+		)
+	}
+
 	// Native Temporal TerminateWorkflow cancels the internal server delay
-	err = s.temporalCli.TerminateWorkflow(ctx, sched.WorkflowID, "", "rescheduled")
+	err = cli.TerminateWorkflow(ctx, sched.WorkflowID, "", "rescheduled")
 	if err != nil {
 		s.log.Warn("failed to terminate temporal workflow on reschedule", zap.Error(err))
 	}
 
-	// Re-start logic requires a full payload so we fetch it
-	n, err := s.notifRepo.GetByID(ctx, notifID)
-	if err != nil {
-		// we skip the actual re-trigger if notif deleted, returning error
-	}
-	
 	req := &workflow.WorkflowRequest{
 		ID:             n.ID,
-		UserID:         n.UserID.String(),
 		Channel:        n.Channel,
+		Priority:       n.Priority,
 		Recipient:      n.Recipient,
 		Type:           n.Type,
 		IdempotencyKey: n.IdempotencyKey,
+		ForcedVendor:   n.ForcedVendor,
+		ClientID:       apiKeyID,
 	}
 	if n.TemplateID != nil {
 		tid := n.TemplateID.String()
 		req.TemplateID = &tid
+		if len(sched.TemplateVars) > 0 {
+			req.TemplateVariables = sched.TemplateVars
+		}
+	} else if n.RenderedContent != nil {
+		req.DirectContent = &workflow.DirectContent{
+			Subject: n.RenderedContent.Subject,
+			Body:    n.RenderedContent.Body,
+			HTML:    n.RenderedContent.HTML,
+		}
 	}
 
 	delaySeconds := int(time.Until(newTime).Seconds())
-	options := client.StartWorkflowOptions{
-		ID:                                   sched.WorkflowID, // preserve ID
-		TaskQueue:                            "notification-default",
-		WorkflowIDReusePolicy:                enums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		StartDelay:                           time.Duration(delaySeconds) * time.Second,
+	taskQueue := workflow.TaskQueueFor(n.Channel, n.Priority, apiKeyID)
+	options := workflow.StartOptions{
+		ID:                    sched.WorkflowID, // preserve ID
+		TaskQueue:             taskQueue,
+		WorkflowIDReusePolicy: workflow.IDReusePolicyAllowDuplicate,
+		StartDelay:            time.Duration(delaySeconds) * time.Second,
 	}
 
-	// This is slightly tricky inline, but we assume workflow.NotificationWorkflow is passed stringly or via interface
-	run, err := s.temporalCli.ExecuteWorkflow(ctx, options, "NotificationWorkflow", req)
+	var workflowFunc any = workflow.NotificationWorkflow
+	if cli.ProviderName() == "cadence" {
+		workflowFunc = workflow.NotificationWorkflowCadence
+	}
+	run, err := cli.ExecuteWorkflow(ctx, options, workflowFunc, req)
 	if err != nil {
 		return nil, fmt.Errorf("re-executing rescheduled workflow: %w", err)
 	}
@@ -146,7 +179,30 @@ func (s *SchedulerService) Cancel(ctx context.Context, notifID uuid.UUID) error 
 		}
 	}
 
-	err = s.temporalCli.TerminateWorkflow(ctx, sched.WorkflowID, "", "cancelled by user")
+	// Prefer the client stored on the scheduled record; fall back to the notification's API key.
+	apiKeyID := ""
+	if sched.APIKeyID != nil {
+		apiKeyID = sched.APIKeyID.String()
+	} else {
+		n, _ := s.notifRepo.GetByID(ctx, notifID)
+		if n != nil && n.APIKeyID != nil {
+			apiKeyID = n.APIKeyID.String()
+		}
+	}
+	cli, err := s.wfClients.ClientForScope(ctx, &apiKeyID)
+	if err != nil {
+		return err
+	}
+	if cli == nil {
+		return domain.NewAppError(
+			"WORKFLOWS_DISABLED",
+			"cancelling scheduled notifications requires Temporal/Cadence; enable workflow orchestration",
+			400,
+			nil,
+		)
+	}
+
+	err = cli.TerminateWorkflow(ctx, sched.WorkflowID, "", "cancelled by user")
 	if err != nil {
 		s.log.Warn("failed to terminate temporal workflow on cancel", zap.Error(err))
 	}
@@ -172,9 +228,8 @@ func (s *SchedulerService) Cancel(ctx context.Context, notifID uuid.UUID) error 
 
 func (s *SchedulerService) ListScheduled(
 	ctx context.Context,
-	userID *uuid.UUID,
 	statuses []domain.NotificationStatus,
 	page, pageSize int,
 ) ([]*domain.ScheduledNotification, int64, error) {
-	return s.schedRepo.List(ctx, userID, statuses, page, pageSize)
+	return s.schedRepo.List(ctx, statuses, page, pageSize)
 }

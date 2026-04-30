@@ -76,11 +76,86 @@ func CORS() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Request-ID,Idempotency-Key")
+		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Request-ID,Idempotency-Key,X-API-Key,X-Service-Token")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
+		c.Next()
+	}
+}
+
+// AuthContext is a minimal interface for auth middlewares that need to verify API keys.
+// It lives in handler to avoid repository/service import cycles.
+type AuthAPIKeyVerifier interface {
+	VerifyAPIKey(ctx *gin.Context, apiKey string) (callerID string, ok bool, err error)
+}
+
+// AnyAuth allows a request if either a valid JWT bearer token is present or a valid X-API-Key is present.
+// In debug mode, it allows requests with no credentials (matching JWTAuth behavior).
+func AnyAuth(jwtSecret string, isDebugMode bool, verifier AuthAPIKeyVerifier) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Debug shortcut (same as JWTAuth)
+		if isDebugMode && c.GetHeader("Authorization") == "" && c.GetHeader("X-API-Key") == "" {
+			c.Set("claims", map[string]interface{}{"sub": "debug-admin", "role": "admin"})
+			c.Set("caller_id", "debug-admin")
+			c.Next()
+			return
+		}
+
+		// Try JWT first (preserves existing behavior for UI/admin usage)
+		authHeader := c.GetHeader("Authorization")
+		if authHeader != "" {
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+				tokenStr := parts[1]
+				token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (any, error) {
+					if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+						return nil, jwt.ErrSignatureInvalid
+					}
+					return []byte(jwtSecret), nil
+				})
+				if err == nil && token != nil && token.Valid {
+					if claims, ok := token.Claims.(jwt.MapClaims); ok {
+						c.Set("claims", claims)
+						if sub, ok := claims["sub"].(string); ok {
+							c.Set("caller_id", sub)
+						}
+					}
+					c.Next()
+					return
+				}
+			}
+			respondError(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
+			c.Abort()
+			return
+		}
+
+		// Fall back to API key
+		apiKey := c.GetHeader("X-API-Key")
+		if apiKey == "" {
+			respondError(c, http.StatusUnauthorized, "UNAUTHORIZED", "missing Authorization header or X-API-Key")
+			c.Abort()
+			return
+		}
+		if verifier == nil {
+			respondError(c, http.StatusUnauthorized, "UNAUTHORIZED", "api key auth not configured")
+			c.Abort()
+			return
+		}
+		callerID, ok, err := verifier.VerifyAPIKey(c, apiKey)
+		if err != nil {
+			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "api key verification failed")
+			c.Abort()
+			return
+		}
+		if !ok {
+			respondError(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid API key")
+			c.Abort()
+			return
+		}
+		c.Set("claims", map[string]interface{}{"sub": callerID, "role": "api_key"})
+		c.Set("caller_id", callerID)
 		c.Next()
 	}
 }
@@ -133,6 +208,44 @@ func JWTAuth(secret string, isDebugMode bool) gin.HandlerFunc {
 	}
 }
 
+// RequireRole enforces that the JWT claim `role` matches one of the allowed roles.
+func RequireRole(allowed ...string) gin.HandlerFunc {
+	allowedSet := map[string]struct{}{}
+	for _, r := range allowed {
+		allowedSet[r] = struct{}{}
+	}
+	return func(c *gin.Context) {
+		claimsAny, ok := c.Get("claims")
+		if !ok {
+			respondError(c, http.StatusUnauthorized, "UNAUTHORIZED", "missing auth claims")
+			c.Abort()
+			return
+		}
+		role := ""
+		switch v := claimsAny.(type) {
+		case jwt.MapClaims:
+			if s, ok := v["role"].(string); ok {
+				role = s
+			}
+		case map[string]interface{}:
+			if s, ok := v["role"].(string); ok {
+				role = s
+			}
+		}
+		if role == "" {
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "missing role")
+			c.Abort()
+			return
+		}
+		if _, ok := allowedSet[role]; !ok {
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "insufficient role")
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 // ServiceAuth validates internal service tokens (simpler than full JWT).
 func ServiceAuth(secret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -176,14 +289,14 @@ func RequestSizeLimiter(maxMB int) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		
+
 		limit := int64(maxMB) * 1024 * 1024
 		if c.Request.ContentLength > limit {
 			respondError(c, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds maximum allowed size")
 			c.Abort()
 			return
 		}
-		
+
 		// Also wrap the reader to be safe for chunked encoding
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
 		c.Next()
@@ -261,16 +374,6 @@ func RateLimiter(cfg config.SecurityConfig) gin.HandlerFunc {
 		mu.Unlock()
 
 		if !cl.limiter.Allow() {
-			// If request rate is extremely high (e.g., 5x burst), block the IP (DDoS protection)
-			// This is a simple heuristic: if they keep hitting the limit while burst is exhausted.
-			// For a real implementation, we'd track "violations" count.
-			// Here we just use a catastrophic threshold if they try to burst way beyond allowed.
-			if !cl.limiter.AllowN(time.Now(), cfg.RateLimit.Burst*10) {
-				blockListMu.Lock()
-				globalBlockList[ip] = time.Now().Add(cfg.DDoS.BlockDuration)
-				blockListMu.Unlock()
-			}
-
 			c.Header("Retry-After", "1")
 			respondError(c, http.StatusTooManyRequests, "RATE_LIMITED", "too many requests")
 			c.Abort()

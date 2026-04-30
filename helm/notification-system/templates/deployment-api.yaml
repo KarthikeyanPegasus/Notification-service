@@ -84,6 +84,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "notification-system.secretName" . }}
                   key: GCP_PROJECT_ID
+            - name: NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: VENDOR_CONFIG_ENCRYPTION_KEY
+            - name: NS_PROVIDERS_WEBHOOK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: WEBHOOK_SIGNING_SECRET
+            - name: NS_PROVIDERS_PUSH_FCM_SERVICE_ACCOUNT_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "notification-system.secretName" . }}
+                  key: FCM_SERVICE_ACCOUNT_JSON
             {{- range $key, $val := .Values.api.env }}
             - name: {{ $key }}
               value: {{ $val | quote }}

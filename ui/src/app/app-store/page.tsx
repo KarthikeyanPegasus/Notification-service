@@ -7,9 +7,15 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { VENDORS, CATEGORIES, Vendor, Category } from '@/lib/vendors'
-import { getVendorConfigs, updateVendorConfig, VendorConfig } from '@/lib/api'
+import {
+  getVendorConfigsScoped,
+  updateVendorConfigScoped,
+} from '@/lib/api'
+import type { VendorConfig } from '@/types'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
-import { Loader2, Search, CheckCircle2, AlertCircle, ArrowRight, Settings, Upload, FileJson, Terminal, Info } from 'lucide-react'
+import { ClientScopeSelect } from '@/components/shared/client-scope-select'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Loader2, Search, CheckCircle2, AlertCircle, ArrowRight, Settings, Upload, FileJson, Terminal, Info, Plus, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export default function AppStorePage() {
@@ -23,15 +29,17 @@ export default function AppStorePage() {
   const [configJson, setConfigJson] = useState('{\n  \n}')
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
+  const [apiKeyId, setApiKeyId] = useState<string | undefined>(undefined)
+  const [sesAuthMode, setSesAuthMode] = useState<'smtp' | 'keys'>('smtp')
 
   useEffect(() => {
     loadConnectedVendors()
-  }, [])
+  }, [apiKeyId])
 
   const loadConnectedVendors = async () => {
     try {
       setLoading(true)
-      const data = await getVendorConfigs()
+      const data = await getVendorConfigsScoped(apiKeyId)
       const connected = new Set(data.map(v => v.vendor_type))
       setConnectedVendors(connected)
     } catch (err) {
@@ -52,8 +60,7 @@ export default function AppStorePage() {
       } else {
         payload = { ...formData }
       }
-
-      await updateVendorConfig(activeVendor.id, payload)
+      await updateVendorConfigScoped(activeVendor.id, payload, apiKeyId)
       setMessage({ type: 'success', text: `Successfully connected to ${activeVendor.name}!` })
       setConnectedVendors(prev => new Set(prev).add(activeVendor.id))
       setTimeout(() => {
@@ -115,6 +122,39 @@ export default function AppStorePage() {
     }
 
     switch (activeVendor.id) {
+      case 'mailgun':
+        return (
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Mailgun Domain</label>
+              <Input
+                placeholder="mg.yourdomain.com"
+                value={formData.domain || ''}
+                onChange={(e) => updateField('domain', e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Your verified sending domain in Mailgun (e.g. <span className="font-mono">mg.example.com</span>).
+              </p>
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">API Key</label>
+              <Input
+                type="password"
+                placeholder="key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                value={formData.api_key || ''}
+                onChange={(e) => updateField('api_key', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">From (Optional)</label>
+              <Input
+                placeholder="NotifyHub <noreply@mg.yourdomain.com>"
+                value={formData.from || ''}
+                onChange={(e) => updateField('from', e.target.value)}
+              />
+            </div>
+          </div>
+        )
       case 'ses':
         return (
           <div className="space-y-4">
@@ -136,25 +176,86 @@ export default function AppStorePage() {
                 />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <label className="text-sm font-medium">SMTP Username</label>
-                <Input 
-                  placeholder="AKIA..."
-                  value={formData.smtp_username || ''}
-                  onChange={e => updateField('smtp_username', e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <label className="text-sm font-medium">SMTP Password</label>
-                <Input 
-                  type="password"
-                  placeholder="Enter SMTP password"
-                  value={formData.smtp_password || ''}
-                  onChange={e => updateField('smtp_password', e.target.value)}
-                />
-              </div>
+
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Authentication method</label>
+              <Select 
+                value={sesAuthMode} 
+                onValueChange={(v) => {
+                  setSesAuthMode(v as any)
+                  if (v === 'keys') {
+                    setFormData(prev => {
+                      const next = { ...prev }
+                      delete next.smtp_username
+                      delete next.smtp_password
+                      return next
+                    })
+                  } else {
+                    setFormData(prev => {
+                      const next = { ...prev }
+                      delete next.access_key_id
+                      delete next.access_secret
+                      delete next.secret_access_key
+                      return next
+                    })
+                  }
+                }}
+              >
+                <SelectTrigger><SelectValue placeholder="Select auth method" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="smtp">SMTP credentials (recommended)</SelectItem>
+                  <SelectItem value="keys">AWS access keys</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Choose one method. SMTP is usually simplest for sending emails via SES.
+              </p>
             </div>
+
+            {sesAuthMode === 'smtp' ? (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">SMTP Username</label>
+                  <Input 
+                    placeholder="AKIA..."
+                    value={formData.smtp_username || ''}
+                    onChange={e => updateField('smtp_username', e.target.value)}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">SMTP Password</label>
+                  <Input 
+                    type="password"
+                    placeholder="Enter SMTP password"
+                    value={formData.smtp_password || ''}
+                    onChange={e => updateField('smtp_password', e.target.value)}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Access Key ID</label>
+                  <Input
+                    placeholder="AKIA..."
+                    value={formData.access_key_id || ''}
+                    onChange={e => updateField('access_key_id', e.target.value)}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Access Secret</label>
+                  <Input
+                    type="password"
+                    placeholder="AWS secret access key"
+                    value={formData.access_secret || formData.secret_access_key || ''}
+                    onChange={e => {
+                      updateField('access_secret', e.target.value)
+                      updateField('secret_access_key', e.target.value)
+                    }}
+                  />
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-2">
                 <label className="text-sm font-medium">From Email</label>
@@ -205,6 +306,36 @@ export default function AppStorePage() {
             </div>
           </div>
         )
+      case 'plivo':
+        return (
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Auth ID (Account ID)</label>
+              <Input
+                placeholder="Your Plivo auth ID"
+                value={formData.auth_id || ''}
+                onChange={e => updateField('auth_id', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Auth Token</label>
+              <Input
+                type="password"
+                placeholder="Your Plivo auth token"
+                value={formData.auth_token || ''}
+                onChange={e => updateField('auth_token', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">From Number</label>
+              <Input
+                placeholder="+1234567890"
+                value={formData.from_number || ''}
+                onChange={e => updateField('from_number', e.target.value)}
+              />
+            </div>
+          </div>
+        )
       case 'sendgrid':
         return (
           <div className="space-y-4">
@@ -223,6 +354,44 @@ export default function AppStorePage() {
                 placeholder="notifications@yourdomain.com"
                 value={formData.from_email || ''}
                 onChange={e => updateField('from_email', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">From Name (Optional)</label>
+              <Input
+                placeholder="NotifyHub"
+                value={formData.from_name || ''}
+                onChange={e => updateField('from_name', e.target.value)}
+              />
+            </div>
+          </div>
+        )
+      case 'postmark':
+        return (
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Server API Token</label>
+              <Input
+                type="password"
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                value={formData.server_token || ''}
+                onChange={e => updateField('server_token', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">From Email</label>
+              <Input
+                placeholder="notifications@yourdomain.com"
+                value={formData.from_email || ''}
+                onChange={e => updateField('from_email', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">From Name (Optional)</label>
+              <Input
+                placeholder="NotifyHub"
+                value={formData.from_name || ''}
+                onChange={e => updateField('from_name', e.target.value)}
               />
             </div>
           </div>
@@ -267,19 +436,184 @@ export default function AppStorePage() {
             </div>
           </div>
         )
-      case 'slack':
-      case 'discord':
-      case 'webhooks':
+      case 'onesignal':
         return (
           <div className="space-y-4">
             <div className="grid gap-2">
-              <label className="text-sm font-medium">Webhook URL</label>
-              <Input 
-                placeholder="https://hooks.slack.com/services/..."
-                value={formData.webhook_url || ''}
-                onChange={e => updateField('webhook_url', e.target.value)}
+              <label className="text-sm font-medium">App ID</label>
+              <Input
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                value={formData.app_id || ''}
+                onChange={e => updateField('app_id', e.target.value)}
               />
             </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">REST API Key</label>
+              <Input
+                type="password"
+                placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                value={formData.rest_api_key || ''}
+                onChange={e => updateField('rest_api_key', e.target.value)}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              This implementation sends to OneSignal <span className="font-mono">external_user_id</span> (use recipient as that id).
+            </p>
+          </div>
+        )
+      case 'pusher':
+        return (
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Beams Instance ID</label>
+              <Input
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                value={formData.instance_id || ''}
+                onChange={e => updateField('instance_id', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Beams Secret Key</label>
+              <Input
+                type="password"
+                placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                value={formData.secret_key || ''}
+                onChange={e => updateField('secret_key', e.target.value)}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              This implementation publishes to a single interest (use recipient as the interest name).
+            </p>
+          </div>
+        )
+      case 'messagebird':
+        return (
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Access Key</label>
+              <Input
+                type="password"
+                placeholder="live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                value={formData.access_key || ''}
+                onChange={e => updateField('access_key', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Originator (From)</label>
+              <Input
+                placeholder="YourBrand or +1234567890"
+                value={formData.originator || ''}
+                onChange={e => updateField('originator', e.target.value)}
+              />
+            </div>
+          </div>
+        )
+      case 'telegram':
+        return (
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Bot Token</label>
+              <Input
+                type="password"
+                placeholder="123456789:AA..."
+                value={formData.bot_token || ''}
+                onChange={e => updateField('bot_token', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Chat ID</label>
+              <Input
+                placeholder="-1001234567890"
+                value={formData.chat_id || ''}
+                onChange={e => updateField('chat_id', e.target.value)}
+              />
+            </div>
+          </div>
+        )
+      case 'slack':
+      case 'discord':
+      case 'teams':
+      case 'webhooks':
+        return (
+          <div className="space-y-4">
+            {activeVendor?.id === 'slack' ? (
+              <>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Slack channels</label>
+                  <p className="text-xs text-muted-foreground">
+                    Add one or more named channels. You’ll reference them by name in the send request as <span className="font-mono">slack_channel</span>.
+                  </p>
+                  <div className="space-y-2">
+                    {Array.isArray(formData.channels) && formData.channels.length > 0 ? (
+                      formData.channels.map((ch: any, idx: number) => (
+                        <div key={idx} className="grid grid-cols-1 md:grid-cols-[1fr_2fr_auto] gap-2">
+                          <Input
+                            placeholder="alerts"
+                            value={ch.channel_name || ''}
+                            onChange={(e) => {
+                              const next = [...formData.channels]
+                              next[idx] = { ...(next[idx] ?? {}), channel_name: e.target.value }
+                              updateField('channels', next)
+                            }}
+                          />
+                          <Input
+                            placeholder="https://hooks.slack.com/services/..."
+                            value={ch.webhook_url || ''}
+                            onChange={(e) => {
+                              const next = [...formData.channels]
+                              next[idx] = { ...(next[idx] ?? {}), webhook_url: e.target.value }
+                              updateField('channels', next)
+                            }}
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => {
+                              const next = [...(formData.channels ?? [])]
+                              next.splice(idx, 1)
+                              updateField('channels', next)
+                            }}
+                            aria-label="Remove channel"
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-xs text-muted-foreground">No channels yet.</p>
+                    )}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => updateField('channels', [...(formData.channels ?? []), { channel_name: '', webhook_url: '' }])}
+                    >
+                      <Plus className="h-4 w-4 mr-2" />
+                      Add channel
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Legacy single webhook (optional)</label>
+                  <Input
+                    placeholder="https://hooks.slack.com/services/..."
+                    value={formData.webhook_url || ''}
+                    onChange={(e) => updateField('webhook_url', e.target.value)}
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="grid gap-2">
+                <label className="text-sm font-medium">Webhook URL</label>
+                <Input 
+                  placeholder="https://hooks.slack.com/services/..."
+                  value={formData.webhook_url || ''}
+                  onChange={e => updateField('webhook_url', e.target.value)}
+                />
+              </div>
+            )}
           </div>
         )
       default:
@@ -310,6 +644,14 @@ export default function AppStorePage() {
     return matchesCategory && matchesSearch
   })
 
+  const canSubmit = (() => {
+    if (!activeVendor || isAdvancedMode) return true
+    if (activeVendor.id === 'mailgun') {
+      return Boolean(String(formData.domain ?? '').trim() && String(formData.api_key ?? '').trim())
+    }
+    return true
+  })()
+
   return (
     <div className="flex flex-col gap-8 p-6 max-w-6xl mx-auto pb-20">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
@@ -317,14 +659,20 @@ export default function AppStorePage() {
           title="App Store" 
           description="Discover and connect delivery providers for your notifications." 
         />
-        <div className="relative w-full md:w-80">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input 
-            placeholder="Search vendors..." 
-            className="pl-10 bg-background/50 backdrop-blur-sm border-muted-foreground/20 focus:border-primary transition-all"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
+        <div className="flex w-full flex-col gap-3 md:w-auto md:flex-row md:items-center">
+          <div className="w-full md:w-72">
+            <ClientScopeSelect className="w-full" onScopeChange={setApiKeyId} />
+          </div>
+
+          <div className="relative w-full md:w-80">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input 
+              placeholder="Search vendors..." 
+              className="pl-10 bg-background/50 backdrop-blur-sm border-muted-foreground/20 focus:border-primary transition-all"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
         </div>
       </div>
 
@@ -409,6 +757,7 @@ export default function AppStorePage() {
                         // For now we'll just reset or keep current state
                       }
                       setFormData({})
+                      if (vendor.id === 'ses') setSesAuthMode('smtp')
                       setConfigJson('{\n  \n}')
                     }}
                   >
@@ -455,7 +804,9 @@ export default function AppStorePage() {
                 {activeVendor && <activeVendor.icon className="h-5 w-5" />}
               </div>
               <div className="flex flex-col">
-                <CardTitle>Connect to {activeVendor?.name}</CardTitle>
+                <DialogTitle className="text-lg font-semibold leading-none tracking-tight">
+                  Connect to {activeVendor?.name}
+                </DialogTitle>
                 <DialogDescription>
                   Enter your configuration settings for {activeVendor?.category.toUpperCase()} delivery.
                 </DialogDescription>
@@ -498,7 +849,7 @@ export default function AppStorePage() {
             <Button variant="ghost" onClick={() => setActiveVendor(null)} disabled={saving}>Cancel</Button>
             <Button 
               className="px-8 shadow-lg shadow-primary/20"
-              disabled={saving} 
+              disabled={saving || !canSubmit}
               onClick={handleConnect}
             >
               {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}

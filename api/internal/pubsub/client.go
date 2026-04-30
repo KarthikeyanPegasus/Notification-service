@@ -10,31 +10,72 @@ import (
 	"github.com/spidey/notification-service/internal/config"
 )
 
-// TopicID maps channel names to Pub/Sub topic IDs.
+// TopicID maps channel+priority keys to Kafka topic names.
+// Topics are segregated by priority: notifications-{channel}-{priority}.
+// Clients use the REST API only — there is no pubsub ingress path.
+// Workers consume from priority topics; the notification service publishes here.
 var TopicID = map[string]string{
-	"otp":       "notifications-otp",
-	"email":     "notifications-email",
-	"sms":       "notifications-sms",
-	"push":      "notifications-push",
-	"websocket": "notifications-websocket",
-	"webhook":   "notifications-webhook",
-	"slack":     "notifications-slack",
-	"dlq":       "notifications-dlq",
-	"config":    "internal-config-reload",
-	"ingress":   "notifications-ingress",
+	"config": "internal-config-reload",
+	"dlq":    "notifications-dlq",
+
+	"email-high":   "notifications-email-high",
+	"email-medium": "notifications-email-medium",
+	"email-low":    "notifications-email-low",
+
+	"sms-high":   "notifications-sms-high",
+	"sms-medium": "notifications-sms-medium",
+	"sms-low":    "notifications-sms-low",
+
+	"push-high":   "notifications-push-high",
+	"push-medium": "notifications-push-medium",
+	"push-low":    "notifications-push-low",
+
+	"webhook-high":   "notifications-webhook-high",
+	"webhook-medium": "notifications-webhook-medium",
+	"webhook-low":    "notifications-webhook-low",
+
+	"slack-high":   "notifications-slack-high",
+	"slack-medium": "notifications-slack-medium",
+	"slack-low":    "notifications-slack-low",
+
+	"websocket-high":   "notifications-websocket-high",
+	"websocket-medium": "notifications-websocket-medium",
+	"websocket-low":    "notifications-websocket-low",
 }
 
-// Message is the envelope published to a Pub/Sub topic.
+// PriorityTopicKey returns the map key for publishing to a priority-specific topic.
+// e.g. PriorityTopicKey("email", "high") → "email-high"
+func PriorityTopicKey(channel, priority string) string {
+	if priority == "" {
+		priority = "low"
+	}
+	return channel + "-" + priority
+}
+
+// PriorityTopicName returns the Kafka/pubsub topic name for a channel+priority pair.
+func PriorityTopicName(channel, priority string) string {
+	key := PriorityTopicKey(channel, priority)
+	if topic, ok := TopicID[key]; ok {
+		return topic
+	}
+	return "notifications-" + channel + "-" + priority
+}
+
+// Message is the envelope published to a Kafka/pubsub topic.
 type Message struct {
 	NotificationID string            `json:"notification_id"`
 	Channel        string            `json:"channel"`
 	UserID         string            `json:"user_id"`
+	// ClientID is the API key ID of the caller; used by the Dispatcher to route
+	// the workflow to the correct client-scoped Temporal task queue.
+	ClientID       string            `json:"client_id,omitempty"`
 	Recipient      string            `json:"recipient"`
 	Priority       string            `json:"priority"`
 	Type           string            `json:"type"`
 	TemplateID     string            `json:"template_id,omitempty"`
 	Payload        map[string]string `json:"payload,omitempty"`
 	IdempotencyKey string            `json:"idempotency_key"`
+	ForcedVendor   string            `json:"forced_vendor,omitempty"`
 }
 
 // Publisher sends messages to Pub/Sub topics.

@@ -16,11 +16,11 @@ import { ErrorState } from '@/components/shared/error-state'
 import { formatDate, truncateId } from '@/lib/utils'
 import { ArrowLeft, Copy, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
-import { useState } from 'react'
-import { syncNotification } from '@/lib/api'
+import { use, useState } from 'react'
+import { retriggerNotification, syncNotification } from '@/lib/api'
 
 interface Props {
-  params: { id: string }
+  params: Promise<{ id: string }>
 }
 
 const priorityVariants: Record<string, 'default' | 'secondary' | 'warning' | 'destructive'> = {
@@ -40,7 +40,7 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
 }
 
 export default function NotificationDetailPage({ params }: Props) {
-  const { id } = params
+  const { id } = use(params)
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['notification', id],
@@ -49,12 +49,16 @@ export default function NotificationDetailPage({ params }: Props) {
   })
 
   const [isSyncing, setIsSyncing] = useState(false)
+  const [isRetriggering, setIsRetriggering] = useState(false)
 
   const handleSync = async () => {
     setIsSyncing(true)
     try {
       const res = await syncNotification(id)
-      toast.success(`Synced with vendor: ${res.vendor_status}`)
+      const label = res.vendor_status
+        ? `${res.provider}: ${res.vendor_status}`
+        : res.success ? 'Delivered' : 'Not yet delivered'
+      toast.success(`Synced — ${label}`)
       refetch()
     } catch (err: any) {
       toast.error(`Sync failed: ${err.message}`)
@@ -63,9 +67,23 @@ export default function NotificationDetailPage({ params }: Props) {
     }
   }
 
+  const handleRetrigger = async () => {
+    setIsRetriggering(true)
+    try {
+      await retriggerNotification(id)
+      toast.success('Retriggered — queued for delivery')
+      refetch()
+    } catch (err: any) {
+      toast.error(`Retrigger failed: ${err.message}`)
+    } finally {
+      setIsRetriggering(false)
+    }
+  }
+
   // Work with nested notification object from backend response
   const notification = data?.notification ?? null
-  
+  const providerStatus = (data as any)?.provider_status ?? null
+
   // Extract flattened fields if available
   const subject = (data as any)?.subject || notification?.subject
   const body = (data as any)?.body || notification?.rendered_content?.body || notification?.body
@@ -95,11 +113,23 @@ export default function NotificationDetailPage({ params }: Props) {
         ]}
         actions={
           <div className="flex items-center gap-2">
-            <Button 
-              variant="outline" 
-              size="sm" 
-              onClick={handleSync} 
-              disabled={isSyncing || notification.status === 'failed' || !notification.attempts?.length}
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleRetrigger}
+              disabled={
+                isRetriggering ||
+                !['failed', 'queued', 'pending'].includes(notification.status)
+              }
+            >
+              <RefreshCw className={`mr-2 h-4 w-4 ${isRetriggering ? 'animate-spin' : ''}`} />
+              Retrigger
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleSync}
+              disabled={isSyncing || ['delivered', 'bounced', 'failed', 'cancelled', 'suppressed'].includes(notification.status)}
             >
               <RefreshCw className={`mr-2 h-4 w-4 ${isSyncing ? 'animate-spin' : ''}`} />
               Sync from Vendor
@@ -172,6 +202,47 @@ export default function NotificationDetailPage({ params }: Props) {
           <DetailRow label="Updated At" value={formatDate(notification.updated_at)} />
         </CardContent>
       </Card>
+
+      {/* Live provider status (shown when auto-poll ran on page load) */}
+      {providerStatus && (
+        <Card className="border-blue-200 bg-blue-50/50 dark:border-blue-900 dark:bg-blue-950/20">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base flex items-center gap-2">
+              <RefreshCw className="h-4 w-4 text-blue-500" />
+              Live Vendor Status
+              <Badge variant="outline" className="text-xs font-mono ml-auto">{providerStatus.provider}</Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <div className="flex flex-wrap gap-4 text-sm">
+              <div>
+                <span className="text-muted-foreground mr-1">Status:</span>
+                <Badge variant={providerStatus.success ? 'success' : 'warning'} className="capitalize">
+                  {providerStatus.vendor_status || (providerStatus.success ? 'delivered' : 'pending')}
+                </Badge>
+              </div>
+              {providerStatus.provider_msg_id && (
+                <div>
+                  <span className="text-muted-foreground mr-1">Provider ID:</span>
+                  <code className="text-xs bg-muted rounded px-1">{providerStatus.provider_msg_id}</code>
+                </div>
+              )}
+              {providerStatus.error_code && (
+                <div>
+                  <span className="text-muted-foreground mr-1">Error Code:</span>
+                  <code className="text-xs text-red-600">{providerStatus.error_code}</code>
+                </div>
+              )}
+              {providerStatus.error_message && (
+                <div>
+                  <span className="text-muted-foreground mr-1">Detail:</span>
+                  <span className="text-xs text-muted-foreground">{providerStatus.error_message}</span>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Event Timeline */}
       <Card>

@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,13 +19,16 @@ import (
 	"github.com/spidey/notification-service/internal/cache"
 	"github.com/spidey/notification-service/internal/circuit"
 	"github.com/spidey/notification-service/internal/config"
+	"github.com/spidey/notification-service/internal/domain"
 	"github.com/spidey/notification-service/internal/handler"
 	"github.com/spidey/notification-service/internal/pubsub"
 	"github.com/spidey/notification-service/internal/repository"
+	"github.com/spidey/notification-service/internal/security"
 	"github.com/spidey/notification-service/internal/service"
 	"github.com/spidey/notification-service/internal/workflow"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func main() {
@@ -58,27 +64,31 @@ func main() {
 
 	// Pub/Sub publisher
 	var publisher pubsub.Publisher
-	if cfg.PubSub.Mode == "mock" {
+	switch cfg.PubSub.Mode {
+	case "mock":
 		log.Info("using mock pubsub publisher")
 		publisher = pubsub.NewMockPublisher(log)
-	} else if cfg.PubSub.Mode == "redis" {
+	case "redis":
 		log.Info("using redis pubsub publisher")
 		publisher = pubsub.NewRedisPublisher(redisClient.RDB, log)
-	} else {
+	case "kafka":
+		log.Info("using kafka pubsub publisher", zap.Strings("brokers", cfg.PubSub.Kafka.Brokers))
+		publisher = pubsub.NewKafkaPublisher(cfg.PubSub.Kafka, log)
+	default:
 		publisher, err = pubsub.NewGCPPublisher(ctx, cfg.PubSub)
 		if err != nil {
 			log.Fatal("creating pubsub publisher", zap.Error(err))
 		}
 	}
 	defer publisher.Close()
-	
-	// Temporal Client
-	temporalCli, err := workflow.NewClient(cfg, log)
+
+	// Workflow Engine
+	engine, err := workflow.NewEngine(cfg, log)
 	if err != nil {
-		log.Fatal("creating temporal client", zap.Error(err))
+		log.Fatal("creating workflow engine", zap.Error(err))
 	}
-	if temporalCli != nil {
-		defer temporalCli.Close()
+	if engine != nil {
+		defer engine.Close()
 	}
 
 	// Circuit breaker registry
@@ -91,8 +101,36 @@ func main() {
 	attemptRepo := repository.NewAttemptRepository(db)
 	templateRepo := repository.NewTemplateRepository(db)
 	webhookEventRepo := repository.NewWebhookEventRepository(db)
-	vendorConfigRepo := repository.NewVendorConfigRepository(db)
+	key := cfg.Security.VendorConfigEncryptionKey
+	key = strings.TrimSpace(key)
+	// Treat the default placeholder as "unset" for dev ergonomics.
+	if strings.Contains(key, "ENCRYPTION_KEY_HERE") {
+		key = ""
+	}
+	if key == "" && cfg.Server.Mode != "release" {
+		// Dev-friendly stable key derivation: if a user didn't set a dedicated vendor-config key,
+		// derive a deterministic 32-byte key from the JWT secret so DB-stored configs survive restarts.
+		// In production you MUST set NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY explicitly.
+		sum := sha256.Sum256([]byte(strings.TrimSpace(cfg.JWT.Secret)))
+		key = base64.StdEncoding.EncodeToString(sum[:])
+		log.Warn("security.vendor_config_encryption_key is empty/placeholder; derived a stable key from jwt.secret for non-release mode (set NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY in production)")
+	}
+	vendorCfgCrypto, err := security.NewVendorConfigCrypto(key)
+	if err != nil {
+		log.Fatal("initializing vendor config encryption", zap.Error(err))
+	}
+	vendorConfigRepo := repository.NewVendorConfigRepository(db, vendorCfgCrypto)
 	govRepo := repository.NewGovernanceRepository(db)
+	apiKeyRepo := repository.NewAPIKeyRepository(db)
+	userRepo := repository.NewUserRepository(db)
+	rateLimitRepo := repository.NewVendorRateLimitRepository(db)
+
+	// Bootstrap admin user (optional, config-driven)
+	if cfg.Admin.Email != "" && cfg.Admin.Password != "" {
+		if err := ensureAdminUser(ctx, userRepo, cfg.Admin.Email, cfg.Admin.Name, cfg.Admin.Password, log); err != nil {
+			log.Fatal("bootstrapping admin user failed", zap.Error(err))
+		}
+	}
 
 	if err := cfg.LoadDynamicOverrides(ctx, vendorConfigRepo); err != nil {
 		log.Warn("failed to load dynamic vendor config into memory", zap.Error(err))
@@ -102,21 +140,29 @@ func main() {
 	templateSvc := service.NewTemplateService(templateRepo, redisClient)
 	prefsSvc := service.NewPreferencesService(redisClient)
 	otpSvc := service.NewOTPService(redisClient)
+	wfClients := service.NewWorkflowClientProvider(engine, vendorConfigRepo, cfg, log)
 	notifSvc := service.NewNotificationService(
 		notifRepo, schedRepo, eventRepo, attemptRepo,
-		templateSvc, prefsSvc, temporalCli, publisher, cfg, log,
+		templateSvc, prefsSvc, wfClients, publisher, cfg, vendorConfigRepo, log,
 	)
-	schedSvc := service.NewSchedulerService(schedRepo, notifRepo, eventRepo, temporalCli, log)
+	schedSvc := service.NewSchedulerService(schedRepo, notifRepo, eventRepo, wfClients, log)
 	reconSvc := service.NewReconciliationService(notifRepo, log)
 	configSvc := service.NewConfigService(vendorConfigRepo, publisher, log)
+	apiKeySvc := service.NewAPIKeyService(apiKeyRepo)
+	authSvc := service.NewAuthService(cfg, userRepo)
 
 	// Handlers
-	notifHandler := handler.NewNotificationHandler(notifSvc, schedSvc, log)
+	notifHandler := handler.NewNotificationHandler(notifSvc, schedSvc, userRepo, log)
 	otpHandler := handler.NewOTPHandler(otpSvc, notifSvc, log)
-	webhookHandler := handler.NewWebhookHandler(eventRepo, notifRepo, attemptRepo, webhookEventRepo, log)
+	webhookHandler := handler.NewWebhookHandler(eventRepo, notifRepo, attemptRepo, webhookEventRepo, govRepo, cfg, log)
 	prefsHandler := handler.NewPreferencesHandler(prefsSvc, log)
-	reportHandler := handler.NewReportHandler(webhookEventRepo, notifRepo, log)
-	adminHandler := handler.NewAdminHandler(configSvc, log)
+	reportHandler := handler.NewReportHandler(webhookEventRepo, notifRepo, attemptRepo, userRepo, cfg, vendorConfigRepo, log)
+	adminHandler := handler.NewAdminHandler(configSvc, rateLimitRepo, notifRepo, cfg.Cadence.Mode, log)
+	testDeliveryHandler := handler.NewTestDeliveryHandler(vendorConfigRepo, notifSvc, log)
+	apiKeyHandler := handler.NewAPIKeyHandler(apiKeySvc, log)
+	authHandler := handler.NewAuthHandler(authSvc)
+	userAdminHandler := handler.NewUserAdminHandler(userRepo, apiKeyRepo)
+	meHandler := handler.NewMeHandler(userRepo, apiKeyRepo, apiKeySvc)
 	govHandler := handler.NewGovernanceHandler(govRepo, log)
 	tmplHandler := handler.NewTemplateHandler(templateRepo, templateSvc, log)
 
@@ -134,10 +180,17 @@ func main() {
 		PrefsHandler:        prefsHandler,
 		ReportHandler:       reportHandler,
 		AdminHandler:        adminHandler,
+		TestDeliveryHandler: testDeliveryHandler,
+		APIKeyHandler:       apiKeyHandler,
+		AuthHandler:         authHandler,
+		UserAdminHandler:    userAdminHandler,
+		MeHandler:           meHandler,
 		GovernanceHandler:   govHandler,
 		TemplateHandler:     tmplHandler,
 		CircuitRegistry:     cbRegistry,
 		Config:              cfg,
+		APIKeyVerifier:      apiKeySvc,
+		UserRepo:            userRepo,
 	})
 
 	srv := &http.Server{
@@ -181,7 +234,6 @@ func runMigrations(dsn, dir string) error {
 	return nil
 }
 
-
 func buildLogger(cfg config.LogConfig) *zap.Logger {
 	level := zap.InfoLevel
 	switch cfg.Level {
@@ -215,4 +267,36 @@ func buildLogger(cfg config.LogConfig) *zap.Logger {
 		panic("building logger: " + err.Error())
 	}
 	return log
+}
+
+func ensureAdminUser(
+	ctx context.Context,
+	users *repository.UserRepository,
+	email, name, password string,
+	log *zap.Logger,
+) error {
+	email = strings.TrimSpace(strings.ToLower(email))
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "Admin"
+	}
+
+	// If exists, do nothing.
+	if _, err := users.GetByEmailWithHash(ctx, email); err == nil {
+		log.Info("admin user already exists", zap.String("email", email))
+		return nil
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return fmt.Errorf("lookup admin user: %w", err)
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	u, err := users.Create(ctx, email, name, hash, domain.UserRoleAdmin)
+	if err != nil {
+		return fmt.Errorf("create admin user: %w", err)
+	}
+	log.Info("bootstrapped admin user", zap.String("id", u.ID), zap.String("email", u.Email))
+	return nil
 }

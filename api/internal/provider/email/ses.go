@@ -32,6 +32,10 @@ func NewSESSender(ctx context.Context, cfg config.SESConfig) (*SESSender, error)
 	if cfg.Region == "" {
 		return nil, nil
 	}
+	// Back-compat: allow "access_secret" to stand in for "secret_access_key".
+	if cfg.SecretAccessKey == "" && cfg.AccessSecret != "" {
+		cfg.SecretAccessKey = cfg.AccessSecret
+	}
 
 	resolver := aws.EndpointResolverWithOptionsFunc(
 		func(service, region string, options ...interface{}) (aws.Endpoint, error) {
@@ -55,9 +59,11 @@ func NewSESSender(ctx context.Context, cfg config.SESConfig) (*SESSender, error)
 		from = fmt.Sprintf("%s <%s>", cfg.FromName, cfg.FromAddress)
 	}
 
-	// If only SMTP creds are provided, use SES SMTP endpoint instead of the AWS API.
-	// This matches what the UI currently collects for SES.
-	if cfg.SMTPUsername != "" && cfg.SMTPPassword != "" && cfg.AccessKeyID == "" && cfg.SecretAccessKey == "" {
+	// If API credentials are provided, use SES API mode.
+	// Otherwise, if SMTP credentials are provided, use SES SMTP mode.
+	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
+		// Proceed to API initialization below
+	} else if cfg.SMTPUsername != "" && cfg.SMTPPassword != "" {
 		return &SESSender{
 			client:   nil,
 			from:     from,
@@ -67,6 +73,13 @@ func NewSESSender(ctx context.Context, cfg config.SESConfig) (*SESSender, error)
 			smtpUser: cfg.SMTPUsername,
 			smtpPass: cfg.SMTPPassword,
 		}, nil
+	}
+
+	// If no explicit credentials are provided, the AWS SDK will try multiple sources including EC2 IMDS.
+	// In local/dev environments (like laptops), IMDS calls can hang/time out and make test deliveries appear stuck.
+	// Use anonymous credentials to fail fast with a clear auth error, instead of waiting on IMDS.
+	if cfg.AccessKeyID == "" || cfg.SecretAccessKey == "" {
+		opts = append(opts, awsconfig.WithCredentialsProvider(aws.AnonymousCredentials{}))
 	}
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
@@ -131,6 +144,10 @@ func (s *SESSender) Send(ctx context.Context, n *domain.Notification) (domain.De
 		FromEmailAddress: aws.String(s.from),
 		Destination: &types.Destination{
 			ToAddresses: []string{n.Recipient},
+		},
+		// Embed notification ID as an SES message tag; SNS event payloads include mail.tags
+		EmailTags: []types.MessageTag{
+			{Name: aws.String("notification-id"), Value: aws.String(n.ID.String())},
 		},
 		Content: &types.EmailContent{
 			Simple: &types.Message{

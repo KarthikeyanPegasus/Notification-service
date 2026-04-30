@@ -131,13 +131,25 @@ secrets:
   twilioAccountSid: ""
   twilioAuthToken: ""
   fcmServiceAccountJson: ""
+  # Encrypts vendor configs at rest (base64 32 bytes recommended).
+  vendorConfigEncryptionKey: ""
+  # Webhook signing secret (HMAC) used to validate inbound provider webhooks.
+  webhookSigningSecret: ""
+  # Additional secrets to inject into the shared Secret.
+  extra: {}
 
 # ── ConfigMap ─────────────────────────────────────────────────────────────────
 config:
   pubsubMode: "gcp"
   serverPort: "8080"
   migrationDir: "migrations"
-  webhookSigningSecret: "webhook-signing-secret"
+  # Default workflow engine settings. Per-client overrides come from DB vendor config `workflow_orchestration`.
+  cadence:
+    mode: "standalone" # standalone | cadence | temporal
+    hostPort: ""
+    domain: ""
+  # Additional non-secret config env vars to inject into the shared ConfigMap.
+  extra: {}
 
 # ── PostgreSQL (sub-chart, disable when using external) ───────────────────────
 postgresql:

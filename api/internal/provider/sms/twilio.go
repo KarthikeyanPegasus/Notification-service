@@ -134,13 +134,13 @@ func (s *TwilioSender) GetStatus(ctx context.Context, providerMsgID string) (dom
 	}
 
 	status := extractTwilioStatus(respBody)
-	success := status == "delivered" || status == "sent" || status == "queued" || status == "sending"
+	success := status == "delivered" || status == "sent"
 
 	return domain.DeliveryResult{
 		Success:       success,
 		Provider:      s.ProviderName(),
 		ProviderMsgID: providerMsgID,
-		ErrorMessage:  status, // Using error message field to store vendor-specific status for now
+		VendorStatus:  status,
 	}, nil
 }
 

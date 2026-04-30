@@ -32,7 +32,7 @@ func NewDispatcher(cfg config.WebhookProviderConfig) *Dispatcher {
 	}
 }
 
-func (d *Dispatcher) ProviderName() string { return "webhook-delivery" }
+func (d *Dispatcher) ProviderName() string { return "webhooks" }
 
 func (d *Dispatcher) SignRequest(body []byte, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))

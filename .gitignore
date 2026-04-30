@@ -28,6 +28,7 @@ api/api_start.log
 *.env
 *.env.dev
 *.env.prod
+.gomodcache
 
 # Config
 api/config/config.yaml
@@ -63,3 +64,4 @@ ui/.cache/
 
 # Scratch files
 scratch/
+node_modules

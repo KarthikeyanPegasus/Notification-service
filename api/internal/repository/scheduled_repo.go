@@ -29,24 +29,24 @@ func (r *ScheduledRepository) Create(ctx context.Context, s *domain.ScheduledNot
 
 	const q = `
 		INSERT INTO scheduled_notifications
-			(id, notification_id, user_id, channel, template_id, template_vars,
+			(id, notification_id, channel, template_id, template_vars,
 			 scheduled_at, original_at, cadence_workflow_id, cadence_run_id,
-			 status, reschedule_count, created_at, updated_at)
+			 status, reschedule_count, api_key_id, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`
 
 	_, err = r.db.Pool.Exec(ctx, q,
-		s.ID, s.NotificationID, s.UserID, s.Channel, s.TemplateID, vars,
+		s.ID, s.NotificationID, s.Channel, s.TemplateID, vars,
 		s.ScheduledAt, s.OriginalAt, s.WorkflowID, s.RunID,
-		s.Status, s.RescheduleCount, s.CreatedAt, s.UpdatedAt,
+		s.Status, s.RescheduleCount, s.APIKeyID, s.CreatedAt, s.UpdatedAt,
 	)
 	return err
 }
 
 func (r *ScheduledRepository) GetByNotificationID(ctx context.Context, notifID uuid.UUID) (*domain.ScheduledNotification, error) {
 	const q = `
-		SELECT id, notification_id, user_id, channel, template_id, template_vars,
+		SELECT id, notification_id, channel, template_id, template_vars,
 		       scheduled_at, original_at, cadence_workflow_id, cadence_run_id,
-		       status, reschedule_count, created_at, updated_at
+		       status, reschedule_count, api_key_id, created_at, updated_at
 		FROM scheduled_notifications WHERE notification_id=$1`
 
 	return r.scanOne(r.db.Pool.QueryRow(ctx, q, notifID))
@@ -67,8 +67,8 @@ func (r *ScheduledRepository) UpdateStatus(ctx context.Context, notifID uuid.UUI
 	return err
 }
 
-// List returns pending scheduled notifications with optional pagination.
-func (r *ScheduledRepository) List(ctx context.Context, userID *uuid.UUID, statuses []domain.NotificationStatus, page, pageSize int) ([]*domain.ScheduledNotification, int64, error) {
+// List returns scheduled notifications with optional status filter and pagination.
+func (r *ScheduledRepository) List(ctx context.Context, statuses []domain.NotificationStatus, page, pageSize int) ([]*domain.ScheduledNotification, int64, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -80,11 +80,6 @@ func (r *ScheduledRepository) List(ctx context.Context, userID *uuid.UUID, statu
 	where := "WHERE 1=1"
 	idx := 1
 
-	if userID != nil {
-		where += fmt.Sprintf(" AND user_id=$%d", idx)
-		args = append(args, *userID)
-		idx++
-	}
 	if len(statuses) > 0 {
 		where += fmt.Sprintf(" AND status = ANY($%d)", idx)
 		args = append(args, statuses)
@@ -98,9 +93,9 @@ func (r *ScheduledRepository) List(ctx context.Context, userID *uuid.UUID, statu
 
 	offset := (page - 1) * pageSize
 	dataQ := fmt.Sprintf(`
-		SELECT id, notification_id, user_id, channel, template_id, template_vars,
+		SELECT id, notification_id, channel, template_id, template_vars,
 		       scheduled_at, original_at, cadence_workflow_id, cadence_run_id,
-		       status, reschedule_count, created_at, updated_at
+		       status, reschedule_count, api_key_id, created_at, updated_at
 		FROM scheduled_notifications %s
 		ORDER BY scheduled_at ASC
 		LIMIT $%d OFFSET $%d`, where, idx, idx+1)
@@ -127,9 +122,9 @@ func (r *ScheduledRepository) scanOne(row pgx.Row) (*domain.ScheduledNotificatio
 	s := &domain.ScheduledNotification{}
 	var varBytes []byte
 	err := row.Scan(
-		&s.ID, &s.NotificationID, &s.UserID, &s.Channel, &s.TemplateID, &varBytes,
+		&s.ID, &s.NotificationID, &s.Channel, &s.TemplateID, &varBytes,
 		&s.ScheduledAt, &s.OriginalAt, &s.WorkflowID, &s.RunID,
-		&s.Status, &s.RescheduleCount, &s.CreatedAt, &s.UpdatedAt,
+		&s.Status, &s.RescheduleCount, &s.APIKeyID, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -147,9 +142,9 @@ func (r *ScheduledRepository) scanRow(rows pgx.Rows) (*domain.ScheduledNotificat
 	s := &domain.ScheduledNotification{}
 	var varBytes []byte
 	err := rows.Scan(
-		&s.ID, &s.NotificationID, &s.UserID, &s.Channel, &s.TemplateID, &varBytes,
+		&s.ID, &s.NotificationID, &s.Channel, &s.TemplateID, &varBytes,
 		&s.ScheduledAt, &s.OriginalAt, &s.WorkflowID, &s.RunID,
-		&s.Status, &s.RescheduleCount, &s.CreatedAt, &s.UpdatedAt,
+		&s.Status, &s.RescheduleCount, &s.APIKeyID, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
