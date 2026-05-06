@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/spidey/notification-service/internal/config"
@@ -32,6 +33,7 @@ type WorkflowEngine interface {
 	TerminateWorkflow(ctx context.Context, workflowID string, runID string, reason string) error
 	NewWorker(taskQueue string) WorkflowWorker
 	ProviderName() string
+	Identity() string
 	Close()
 }
 
@@ -47,17 +49,24 @@ type WorkflowWorker interface {
 }
 
 func NewEngine(cfg *config.Config, log *zap.Logger) (WorkflowEngine, error) {
-	// If mode is "cadence", we would eventually use the Cadence implementation.
-	// For now, we'll start with the Temporal implementation and provide a structure for switching.
-	if cfg.Cadence.Mode == "standalone" {
+	mode := normalizeMode(cfg.Cadence.Mode)
+	if mode == "standalone" {
 		return nil, nil
 	}
 
-	if cfg.Cadence.Mode == "cadence" {
+	if mode == "cadence" {
 		return NewCadenceEngine(cfg, log)
 	}
 
 	return NewTemporalEngine(cfg, log)
+}
+
+func normalizeMode(raw string) string {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "" {
+		return "temporal"
+	}
+	return mode
 }
 
 // Basic implementation of WorkflowRun

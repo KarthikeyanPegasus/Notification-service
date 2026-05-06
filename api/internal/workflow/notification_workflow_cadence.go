@@ -50,6 +50,11 @@ func NotificationWorkflowCadence(ctx workflow.Context, req *WorkflowRequest) err
 		return fail("render_template", err)
 	}
 
+	// Step 2.5: Content Security & Spam check
+	if err := workflow.ExecuteActivity(ctx, "ContentSecurityCheckActivity", &rendered).Get(ctx, nil); err != nil {
+		return fail("content_security_check", err)
+	}
+
 	// Step 3: Direct Delivery
 	var result domain.DeliveryResult
 	if err := workflow.ExecuteActivity(ctx, "DeliverNotificationActivity", &rendered).Get(ctx, &result); err != nil {

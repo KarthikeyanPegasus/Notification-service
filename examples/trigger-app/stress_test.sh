@@ -14,19 +14,19 @@ echo "🚀 Starting Parallel Stress Test Suite..."
 # go run main.go -api-keys "$API_KEYS" -channel sms -recipient "$SMS_RECIPIENT" -concurrency 5 -rps 5 -duration 30s -priority high &
 
 echo "Starting Email - High Priority (5 RPS)..."
-go run main.go -api-keys "$API_KEYS" -channel email -recipient "$EMAIL_RECIPIENT" -concurrency 5 -rps 5 -duration 30s -priority high &
+go run main.go -api-keys "$API_KEYS" -channel email -recipient "$EMAIL_RECIPIENT" -concurrency 5 -rps 10 -duration 30s -priority high &
 
 # echo "Starting SMS - Medium Priority (7 RPS)..."
 # go run main.go -api-keys "$API_KEYS" -channel sms -recipient "$SMS_RECIPIENT" -concurrency 5 -rps 7 -duration 30s -priority medium &
 
-echo "Starting Email - Medium Priority (7 RPS)..."
-go run main.go -api-keys "$API_KEYS" -channel email -recipient "$EMAIL_RECIPIENT" -concurrency 5 -rps 7 -duration 30s -priority medium &
+# echo "Starting Email - Medium Priority (7 RPS)..."
+# go run main.go -api-keys "$API_KEYS" -channel email -recipient "$EMAIL_RECIPIENT" -concurrency 5 -rps 7 -duration 30s -priority medium &
 
-# echo "Starting SMS - Low Priority (10 RPS)..."
-# go run main.go -api-keys "$API_KEYS" -channel sms -recipient "$SMS_RECIPIENT" -concurrency 5 -rps 10 -duration 30s -priority low &
+# # echo "Starting SMS - Low Priority (10 RPS)..."
+# # go run main.go -api-keys "$API_KEYS" -channel sms -recipient "$SMS_RECIPIENT" -concurrency 5 -rps 10 -duration 30s -priority low &
 
-echo "Starting Email - Low Priority (10 RPS)..."
-go run main.go -api-keys "$API_KEYS" -channel email -recipient "$EMAIL_RECIPIENT" -concurrency 5 -rps 10 -duration 30s -priority low &
+# echo "Starting Email - Low Priority (10 RPS)..."
+# go run main.go -api-keys "$API_KEYS" -channel email -recipient "$EMAIL_RECIPIENT" -concurrency 5 -rps 10 -duration 30s -priority low &
 
 echo "⏳ All tests launched. Waiting for completion..."
 wait

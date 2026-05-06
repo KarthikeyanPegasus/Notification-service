@@ -76,11 +76,14 @@ type Message struct {
 	Payload        map[string]string `json:"payload,omitempty"`
 	IdempotencyKey string            `json:"idempotency_key"`
 	ForcedVendor   string            `json:"forced_vendor,omitempty"`
+	// AttemptCount tracks the number of delivery attempts (for retry/DLQ logic)
+	AttemptCount   int               `json:"attempt_count,omitempty"`
 }
 
 // Publisher sends messages to Pub/Sub topics.
 type Publisher interface {
 	Publish(ctx context.Context, channel string, msg *Message) (serverMsgID string, err error)
+	PublishToDLQ(ctx context.Context, msg *Message, reason string) (serverMsgID string, err error)
 	Close() error
 }
 
@@ -147,6 +150,35 @@ func (p *GCPPublisher) Publish(ctx context.Context, channel string, msg *Message
 	serverID, err := result.Get(ctx)
 	if err != nil {
 		return "", fmt.Errorf("publishing to topic %s: %w", topicID, err)
+	}
+	return serverID, nil
+}
+
+func (p *GCPPublisher) PublishToDLQ(ctx context.Context, msg *Message, reason string) (string, error) {
+	topicID := DLQTopic
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return "", fmt.Errorf("marshalling dlq message: %w", err)
+	}
+
+	topic := p.client.Topic(topicID)
+	defer topic.Stop()
+
+	result := topic.Publish(ctx, &gcppubsub.Message{
+		Data: data,
+		Attributes: map[string]string{
+			"channel":       msg.Channel,
+			"notifId":       msg.NotificationID,
+			"priority":      msg.Priority,
+			"dlq_reason":    reason,
+		},
+		OrderingKey: msg.UserID,
+	})
+
+	serverID, err := result.Get(ctx)
+	if err != nil {
+		return "", fmt.Errorf("publishing to DLQ topic %s: %w", topicID, err)
 	}
 	return serverID, nil
 }

@@ -30,6 +30,7 @@ import {
 import { Trash2, Plus } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { toast } from 'sonner'
+import { getSuppressions, deleteSuppression, createSuppression } from '@/lib/api'
 
 interface Suppression {
   id: string
@@ -83,9 +84,7 @@ export function SuppressionTable() {
 
   const fetchSuppressions = async () => {
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/v1/governance/suppressions`)
-      if (!res.ok) throw new Error('Failed to fetch')
-      const data = await res.json()
+      const data = await getSuppressions()
       setSuppressions(data || [])
     } catch {
       toast.error('Failed to load suppressions')
@@ -96,10 +95,7 @@ export function SuppressionTable() {
 
   const handleDelete = async (id: string) => {
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/v1/governance/suppressions/${id}`, {
-        method: 'DELETE',
-      })
-      if (!res.ok) throw new Error('Delete failed')
+      await deleteSuppression(id)
       setSuppressions(suppressions.filter(s => s.id !== id))
       toast.success('Suppression removed')
     } catch {
@@ -114,20 +110,11 @@ export function SuppressionTable() {
     }
     setSubmitting(true)
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/v1/governance/suppressions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: form.type,
-          value: form.value.trim(),
-          reason: form.reason.trim() || undefined,
-        }),
+      const created = await createSuppression({
+        type: form.type,
+        value: form.value.trim(),
+        reason: form.reason.trim() || undefined,
       })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to add suppression')
-      }
-      const created = await res.json()
       setSuppressions([created, ...suppressions])
       setDialogOpen(false)
       setForm({ type: 'email', value: '', reason: '' })

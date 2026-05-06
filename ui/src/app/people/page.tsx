@@ -7,50 +7,43 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Loader2, Plus, Save, Trash2, Users } from 'lucide-react'
-import { getAuthToken, listApiKeys, type ApiClientKey } from '@/lib/api'
+import { Loader2, Mail, Save, Trash2, Users } from 'lucide-react'
+import { fetchJSON, listApiKeys, type ApiClientKey } from '@/lib/api'
+import { useMaybeAuth } from '@/components/auth/maybe-clerk'
+import { useUserRole } from '@/hooks/use-user-role'
 
 type Role = 'admin' | 'manager' | 'dev' | 'support'
 type User = { id: string; email: string; name: string; role: Role; created_at: string }
 
-async function apiJSON<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' }
-  const tok = getAuthToken()
-  if (tok) headers['Authorization'] = `Bearer ${tok}`
-  const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}${path}`, {
-    headers,
-    ...init,
-  })
-  if (!res.ok) throw new Error(await res.text())
-  // Some admin endpoints return 204 No Content.
-  if (res.status === 204) return undefined as T
-  const text = await res.text()
-  if (!text) return undefined as T
-  return JSON.parse(text) as T
-}
-
 export default function PeoplePage() {
+  const { isLoaded, isSignedIn } = useMaybeAuth()
+  const callerRole = useUserRole()
+  const isSandbox = callerRole === 'dev'
+
   const [users, setUsers] = useState<User[]>([])
   const [keys, setKeys] = useState<ApiClientKey[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const [createEmail, setCreateEmail] = useState('')
-  const [createName, setCreateName] = useState('')
-  const [createPassword, setCreatePassword] = useState('')
-  const [createRole, setCreateRole] = useState<Role>('dev')
-  const [creating, setCreating] = useState(false)
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteRole, setInviteRole] = useState<Role>('dev')
+  const [inviting, setInviting] = useState(false)
 
   const [selectedUser, setSelectedUser] = useState<User | null>(null)
   const [assignments, setAssignments] = useState<Record<string, boolean>>({})
   const selectedAssignments = useMemo(() => Object.entries(assignments).filter(([, v]) => v).map(([k]) => k), [assignments])
+  // Sandbox limit: count non-admin users. Dev themselves + 1 invited = 2 max.
+  const nonAdminCount = useMemo(() => users.filter((u) => u.role !== 'admin').length, [users])
+  const sandboxInviteLimitReached = isSandbox && nonAdminCount >= 2
   const [savingAssign, setSavingAssign] = useState(false)
+  const [selectedRole, setSelectedRole] = useState<Role>('dev')
+  const [savingRole, setSavingRole] = useState(false)
 
   const load = async () => {
     setLoading(true)
     setError(null)
     try {
-      const u = await apiJSON<User[]>('/v1/admin/users')
+      const u = await fetchJSON<User[]>('/v1/admin/users')
       setUsers(u ?? [])
       const k = await listApiKeys()
       setKeys(k ?? [])
@@ -63,35 +56,34 @@ export default function PeoplePage() {
   }
 
   useEffect(() => {
-    load()
-  }, [])
+    if (isLoaded && isSignedIn) load()
+  }, [isLoaded, isSignedIn])
 
-  const createUser = async () => {
-    setCreating(true)
+  const inviteUser = async () => {
+    setInviting(true)
     setError(null)
     try {
-      await apiJSON('/v1/admin/users', {
+      const res = await fetchJSON<{ id: string; email: string; role: string; status: string; message: string }>('/v1/admin/invitations', {
         method: 'POST',
-        body: JSON.stringify({ email: createEmail, name: createName, password: createPassword, role: createRole }),
+        body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
       })
-      setCreateEmail('')
-      setCreateName('')
-      setCreatePassword('')
-      setCreateRole('dev')
+      setInviteEmail('')
+      setInviteRole('dev')
       await load()
     } catch (e) {
       console.error(e)
-      setError('Failed to create user.')
+      setError('Failed to send invitation.')
     } finally {
-      setCreating(false)
+      setInviting(false)
     }
   }
 
   const loadAssignments = async (u: User) => {
     setSelectedUser(u)
+    setSelectedRole(u.role)
     setAssignments({})
     try {
-      const out = await apiJSON<{ api_key_ids: string[] }>(`/v1/admin/users/${u.id}/clients`)
+      const out = await fetchJSON<{ api_key_ids: string[] }>(`/v1/admin/users/${u.id}/clients`)
       const set = new Set(out.api_key_ids ?? [])
       const next: Record<string, boolean> = {}
       keys.forEach((k) => {
@@ -104,12 +96,31 @@ export default function PeoplePage() {
     }
   }
 
+  const updateRole = async () => {
+    if (!selectedUser) return
+    setSavingRole(true)
+    setError(null)
+    try {
+      await fetchJSON(`/v1/admin/users/${selectedUser.id}/role`, {
+        method: 'PUT',
+        body: JSON.stringify({ role: selectedRole }),
+      })
+      setSelectedUser((u) => u ? { ...u, role: selectedRole } : u)
+      setUsers((prev) => prev.map((u) => u.id === selectedUser.id ? { ...u, role: selectedRole } : u))
+    } catch (e) {
+      console.error(e)
+      setError('Failed to update role.')
+    } finally {
+      setSavingRole(false)
+    }
+  }
+
   const saveAssignments = async () => {
     if (!selectedUser) return
     setSavingAssign(true)
     setError(null)
     try {
-      await apiJSON(`/v1/admin/users/${selectedUser.id}/clients`, {
+      await fetchJSON(`/v1/admin/users/${selectedUser.id}/clients`, {
         method: 'PUT',
         body: JSON.stringify({ api_key_ids: selectedAssignments }),
       })
@@ -126,7 +137,7 @@ export default function PeoplePage() {
     if (!ok) return
     setError(null)
     try {
-      await apiJSON<void>(`/v1/admin/users/${u.id}`, { method: 'DELETE' })
+      await fetchJSON<void>(`/v1/admin/users/${u.id}`, { method: 'DELETE' })
       if (selectedUser?.id === u.id) {
         setSelectedUser(null)
         setAssignments({})
@@ -197,43 +208,44 @@ export default function PeoplePage() {
             )}
 
             <div className="pt-4 border-t space-y-3">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase">Name</label>
-                  <Input value={createName} onChange={(e) => setCreateName(e.target.value)} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase">Email</label>
-                  <Input value={createEmail} onChange={(e) => setCreateEmail(e.target.value)} />
-                </div>
+              <p className="text-xs text-muted-foreground">
+                Send an invitation email via Clerk. The user will sign up and have their role assigned automatically.
+              </p>
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-muted-foreground uppercase">Email</label>
+                <Input
+                  type="email"
+                  placeholder="colleague@company.com"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                />
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase">Password</label>
-                  <Input type="password" value={createPassword} onChange={(e) => setCreatePassword(e.target.value)} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase">Role</label>
-                  <Select value={createRole} onValueChange={(v) => setCreateRole(v as any)}>
-                    <SelectTrigger className="bg-card/50">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="admin">admin</SelectItem>
-                      <SelectItem value="manager">manager</SelectItem>
-                      <SelectItem value="dev">dev</SelectItem>
-                      <SelectItem value="support">support</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-muted-foreground uppercase">Role</label>
+                <Select value={inviteRole} onValueChange={(v) => setInviteRole(v as any)}>
+                  <SelectTrigger className="bg-card/50">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {!isSandbox && <SelectItem value="admin">admin</SelectItem>}
+                    {!isSandbox && <SelectItem value="manager">manager</SelectItem>}
+                    <SelectItem value="dev">dev</SelectItem>
+                    <SelectItem value="support">support</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
+              {sandboxInviteLimitReached && (
+                <p className="text-xs text-amber-600 dark:text-amber-500">
+                  Sandbox accounts are limited to 1 invited user.
+                </p>
+              )}
               <Button
-                onClick={createUser}
-                disabled={creating || !createEmail || !createName || !createPassword}
+                onClick={inviteUser}
+                disabled={inviting || !inviteEmail || sandboxInviteLimitReached}
                 className="w-full"
               >
-                {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
-                Create user
+                {inviting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4 mr-2" />}
+                Send invitation
               </Button>
             </div>
           </CardContent>
@@ -249,12 +261,34 @@ export default function PeoplePage() {
               <p className="text-sm text-muted-foreground">Select a user to manage assignments.</p>
             ) : (
               <>
-                <div className="flex items-center justify-between">
+                <div className="space-y-3 rounded-lg border p-3">
                   <div className="min-w-0">
                     <div className="font-medium truncate">{selectedUser.name}</div>
                     <div className="text-xs text-muted-foreground truncate">{selectedUser.email}</div>
                   </div>
-                  <Badge variant={selectedUser.role === 'admin' ? 'default' : 'secondary'}>{selectedUser.role}</Badge>
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-semibold text-muted-foreground uppercase shrink-0">Role</label>
+                    <Select value={selectedRole} onValueChange={(v) => setSelectedRole(v as Role)}>
+                      <SelectTrigger className="h-8 text-sm bg-card/50">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {!isSandbox && <SelectItem value="admin">admin</SelectItem>}
+                        {!isSandbox && <SelectItem value="manager">manager</SelectItem>}
+                        <SelectItem value="dev">dev</SelectItem>
+                        <SelectItem value="support">support</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={savingRole || selectedRole === selectedUser.role}
+                      onClick={updateRole}
+                      className="shrink-0"
+                    >
+                      {savingRole ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Update'}
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="space-y-2 rounded-lg border p-3">

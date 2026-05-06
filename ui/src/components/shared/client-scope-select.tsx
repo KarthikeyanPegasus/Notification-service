@@ -1,9 +1,11 @@
 'use client'
 
 import { useEffect, useMemo, useState, useRef } from 'react'
+import { useMaybeUser } from '@/components/auth/maybe-clerk'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { getAuthUser, listMyClients, type ApiClientKey } from '@/lib/api'
 import { useClientScope } from '@/lib/client-scope'
+import { effectiveRole } from '@/lib/role'
 
 export function ClientScopeSelect({
   className,
@@ -14,8 +16,10 @@ export function ClientScopeSelect({
   onScopeChange?: (apiKeyId?: string) => void
   includeAll?: boolean
 }) {
-  const authUser = getAuthUser()
-  const role = authUser?.role ?? 'support'
+  // Use Clerk user info if available, fall back to legacy localStorage
+  const { user: clerkUser } = useMaybeUser()
+  const legacyUser = getAuthUser()
+  const role = effectiveRole({ clerkUser, legacyRole: legacyUser?.role, fallback: 'support' })
 
   // Avoid state fights between selectors that allow "all" and selectors that don't.
   // (They share localStorage otherwise, which causes values like "all" to be normalized away on other pages.)

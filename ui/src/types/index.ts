@@ -197,15 +197,85 @@ export interface KafkaTopicLag {
   channel: string
   priority: string
   lag: number
+  total_events: number
 }
 
 export interface AdminKafkaSection {
+  enabled: boolean
+  mode: string
   total_lag: number
+  total_events: number
   topics: KafkaTopicLag[]
+}
+
+export interface AdminMigrationSection {
+  active: number
+  migrations: OrchestrationMigration[]
+  old_worker_total: number
+  new_worker_total: number
+  old_by_priority: Record<string, number>
+  old_by_channel: Record<string, number>
+  old_by_client: AdminWorkerClientSummary[]
+  new_by_priority: Record<string, number>
+  new_by_channel: Record<string, number>
+  new_by_client: AdminWorkerClientSummary[]
+  dry_run_result?: MigrationDryRunResult
+}
+
+export interface MigrationDryRunResult {
+  old_provider: string
+  new_provider: string
+  old_host_port: string
+  new_host_port: string
+  old_namespace: string
+  new_namespace: string
+  old_workflow_count: number
+  total_scheduled_count: number
+  migrated_scheduled_count: number
+  estimated_duration: string
+}
+
+export interface AutoScalerConfigForm {
+  enabled?: boolean
+  evaluation_interval?: string
+  high_mttd_threshold?: string
+  medium_mttd_threshold?: string
+  low_mttd_threshold?: string
+  max_lag_per_worker?: number
+  cooldown_period?: string
+  scale_down_factor?: number
+  idle_threshold?: string
+  unhealthy_threshold?: number
+  global_max_workers?: number
+  global_min_workers?: number
+  mttd_lookback?: string
+}
+
+export interface OrchestrationMigration {
+  id: string
+  api_key_id?: string
+  client_name: string
+  old_provider: string
+  new_provider: string
+  old_config_json?: any
+  new_config_json?: any
+  status: 'in_progress' | 'transferring_scheduled' | 'waiting_old_workers' | 'completed' | 'failed'
+  old_workflow_count: number
+  completed_old_workflows: number
+  migrated_scheduled_count: number
+  total_scheduled_count: number
+  error_message?: string
+  started_at: string
+  completed_at?: string
+  notified_at?: string
+  created_at: string
+  updated_at: string
 }
 
 export interface AdminOverview {
   delivery: {
+    window: AdminDeliveryStats
+    window_label: string
     window_1h: AdminDeliveryStats
     window_24h: AdminDeliveryStats
   }
@@ -215,6 +285,27 @@ export interface AdminOverview {
   workers: AdminWorkersSection
   kafka: AdminKafkaSection
   cadence: AdminCadenceSection
+  migrations: AdminMigrationSection
+  dlq?: AdminDLQSection
+}
+
+export interface AdminDLQSection {
+  total_entries: number
+  pending_replay: number
+  replayed: number
+}
+
+export interface DLQEntry {
+  id: string
+  notification_id?: string
+  channel: string
+  recipient: string
+  reason: string
+  payload?: Record<string, unknown>
+  attempt_count: number
+  replayed: boolean
+  replayed_at?: string
+  created_at: string
 }
 
 export interface NotificationFilters {
@@ -313,4 +404,33 @@ export interface UpsertVendorRateLimitRequest {
   per_10_min?: number | null
   per_hour?: number | null
   per_day?: number | null
+}
+
+export type VendorMigrationStatus = 'in_progress' | 'completed' | 'failed' | 'rolled_back'
+export type MigrationStrategy = 'instant' | 'gradual'
+
+export interface VendorMigration {
+  id: string
+  api_key_id?: string | null
+  channel: 'email' | 'sms' | 'push'
+  from_vendor: string
+  to_vendor: string
+  from_config_json?: any
+  to_config_json: any
+  strategy: MigrationStrategy
+  status: VendorMigrationStatus
+  traffic_percent: number
+  error_message?: string | null
+  started_at: string
+  completed_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface StartVendorMigrationRequest {
+  channel: 'email' | 'sms' | 'push'
+  from_vendor: string
+  to_vendor: string
+  to_config: any
+  strategy?: MigrationStrategy
 }

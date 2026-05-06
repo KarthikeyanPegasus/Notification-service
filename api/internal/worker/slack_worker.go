@@ -24,6 +24,7 @@ type SlackWorker struct {
 
 func NewSlackWorker(
 	subscriber pubsub.Subscriber,
+	publisher pubsub.Publisher,
 	sender *slackprovider.Sender,
 	notifRepo *repository.NotificationRepository,
 	attemptRepo *repository.AttemptRepository,
@@ -43,7 +44,7 @@ func NewSlackWorker(
 	return &SlackWorker{
 		base: newBaseWorker(
 			domain.ChannelSlack, subKey,
-			subscriber, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
+			subscriber, publisher, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
 		),
 		sender: sender,
 	}

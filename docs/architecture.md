@@ -72,11 +72,6 @@ flowchart TB
         RD[("Redis 7\ncache · rate-limit\nOTP · prefs\ncircuit states")]
     end
 
-    subgraph Observability["Observability"]
-        PROM["Prometheus :9090"]
-        GRAF["Grafana :3001"]
-    end
-
     WEB -->|"POST /v1/notifications\nBearer JWT"| GIN
     SVC -->|"POST /v1/otp/send\nX-Service-Token"| GIN
     EXT -->|"publish"| T_ING
@@ -113,10 +108,6 @@ flowchart TB
     WH -->|"update status"| PG
 
     T_CFG -->|"hot-reload vendor config"| Workers
-
-    API  -->|"/metrics"| PROM
-    Workers -->|"/metrics"| PROM
-    PROM --> GRAF
 ```
 
 ---
@@ -133,7 +124,7 @@ flowchart TB
 | **Providers** | SES, Mailgun, SMTP / Twilio, Plivo, Vonage / FCM / HTTP | Actual delivery to end-user |
 | **PostgreSQL** | pgx · golang-migrate | Source of truth: notifications, attempts, events, templates, governance |
 | **Redis** | go-redis v9 | Rate-limit sliding windows, OTP TTLs, preference cache, circuit-breaker state |
-| **Observability** | Prometheus · Grafana | Per-channel delivery rate, latency percentiles, error rates, circuit-breaker flips |
+| **Prometheus Metrics** | prometheus/client_golang | `/metrics` endpoint per service for delivery rate, latency, circuit-breaker flips |
 
 ---
 

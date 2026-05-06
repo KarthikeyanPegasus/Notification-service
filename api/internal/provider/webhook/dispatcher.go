@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -28,6 +29,9 @@ func NewDispatcher(cfg config.WebhookProviderConfig) *Dispatcher {
 		signingSecret: cfg.SigningSecret,
 		client: &http.Client{
 			Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+			},
 		},
 	}
 }
@@ -62,6 +66,10 @@ func (d *Dispatcher) Send(ctx context.Context, n *domain.Notification) (domain.D
 	idempotencyKey := n.IdempotencyKey
 	if idempotencyKey == "" {
 		idempotencyKey = n.ID.String()
+	}
+
+	if !strings.HasPrefix(strings.ToLower(n.Recipient), "https://") {
+		return domain.DeliveryResult{Provider: d.ProviderName()}, fmt.Errorf("webhook recipient must use https scheme, got: %s", n.Recipient)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.Recipient, strings.NewReader(string(body)))

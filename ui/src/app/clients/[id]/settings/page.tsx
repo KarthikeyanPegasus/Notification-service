@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button'
 import { ArrowLeft } from 'lucide-react'
 import { IngressSettings } from '@/components/clients/ingress-settings'
 import { WorkflowOrchestrationSettings } from '@/components/clients/workflow-orchestration-settings'
-import { WorkersPerChannelSettings } from '@/components/clients/workers-per-channel-settings'
 
 interface Props {
   params: Promise<{ id: string }>
@@ -37,7 +36,6 @@ export default function ClientSettingsPage({ params }: Props) {
       />
 
       <WorkflowOrchestrationSettings apiKeyId={id} />
-      <WorkersPerChannelSettings apiKeyId={id} />
       <IngressSettings apiKeyId={id} />
     </div>
   )

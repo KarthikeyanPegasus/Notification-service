@@ -22,6 +22,7 @@ import (
 	"github.com/spidey/notification-service/internal/config"
 	"github.com/spidey/notification-service/internal/domain"
 	"github.com/spidey/notification-service/internal/repository"
+	"github.com/spidey/notification-service/internal/security"
 	"go.uber.org/zap"
 )
 
@@ -107,14 +108,26 @@ func (h *WebhookHandler) handleWebhook(c *gin.Context, isGet bool) {
 		}
 	}
 
+	// Verify provider HMAC/signature before processing
+	if err := h.verifyProviderHMAC(provider, bodyBytes, c.Request.Header, rawPayload, formValues); err != nil {
+		h.log.Warn("webhook HMAC verification rejected",
+			zap.String("provider", provider),
+			zap.Error(err),
+		)
+		respondError(c, http.StatusUnauthorized, "HMAC_VERIFICATION_FAILED", "webhook signature verification failed")
+		c.Abort()
+		return
+	}
+
 	events := h.parseProviderPayload(provider, bodyBytes, c.Request.Header, rawPayload, formValues)
 
-	// Store one raw webhook record per HTTP call
+	// Store one raw webhook record per HTTP call (with PII sanitized)
+	sanitizedPayload := security.SanitizeWebhookPayload(rawPayload)
 	webhookEvent := &domain.ProviderWebhookEvent{
 		ID:         uuid.New(),
 		Provider:   provider,
 		EventType:  "",
-		RawPayload: rawPayload,
+		RawPayload: sanitizedPayload,
 		ReceivedAt: time.Now(),
 	}
 	if len(events) > 0 {
@@ -166,6 +179,51 @@ func (h *WebhookHandler) parseProviderPayload(
 	}
 }
 
+// verifyProviderHMAC checks the provider-specific HMAC/signature on webhook payloads.
+// Returns nil if verification passes or the provider doesn't support HMAC.
+// Returns an error if HMAC verification fails.
+func (h *WebhookHandler) verifyProviderHMAC(
+	provider string, body []byte, headers http.Header,
+	payload map[string]any, form url.Values,
+) error {
+	switch strings.ToLower(provider) {
+	case "mailgun":
+		signingKey := h.cfg.Providers.Email.Mailgun.WebhookSigningKey
+		if signingKey == "" {
+			signingKey = h.cfg.Providers.Email.Mailgun.APIKey
+		}
+		if signingKey != "" {
+			if !verifyMailgunHMAC(payload, signingKey) {
+				return fmt.Errorf("mailgun webhook HMAC verification failed")
+			}
+		} else {
+			h.log.Warn("mailgun webhook signing key not configured — HMAC verification disabled")
+		}
+
+	case "twilio":
+		if authToken := h.cfg.Providers.SMS.Twilio.AuthToken; authToken != "" {
+			sig := headers.Get("X-Twilio-Signature")
+			reqURL := c_requestURL(headers)
+			if sig != "" && reqURL != "" && !verifyTwilioHMAC(authToken, sig, reqURL, form) {
+				return fmt.Errorf("twilio webhook HMAC verification failed")
+			}
+		} else {
+			h.log.Warn("twilio auth token not configured — webhook HMAC verification disabled")
+		}
+
+	case "pusher", "pusher-beams":
+		if secretKey := h.cfg.Providers.Push.Pusher.SecretKey; secretKey != "" {
+			sig := headers.Get("X-Pusher-Signature")
+			if sig != "" && !verifyPusherHMAC(body, secretKey, sig) {
+				return fmt.Errorf("pusher beams webhook HMAC verification failed")
+			}
+		} else {
+			h.log.Warn("pusher beams webhook secret key not configured — HMAC verification disabled")
+		}
+	}
+	return nil
+}
+
 // c_requestURL reconstructs a best-effort URL from headers (for Twilio HMAC).
 func c_requestURL(headers http.Header) string {
 	host := headers.Get("X-Forwarded-Host")
@@ -187,7 +245,31 @@ func (h *WebhookHandler) parseSNS(payload map[string]any) []deliveryEvent {
 
 	if snsType == "SubscriptionConfirmation" {
 		if subURL := extractString(payload, "SubscribeURL"); subURL != "" {
-			go func() { _, _ = http.Get(subURL) }() //nolint:noctx
+			if !isAllowedSNSURL(subURL) {
+				// Reject to prevent SSRF: only auto-confirm genuine AWS SNS endpoints.
+				return nil
+			}
+			go func() {
+				confirmCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				req, err := http.NewRequestWithContext(confirmCtx, http.MethodGet, subURL, nil)
+				if err != nil {
+					h.log.Error("SNS subscription confirmation: failed to create request",
+						zap.String("url", subURL),
+						zap.Error(err),
+					)
+					return
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					h.log.Error("SNS subscription confirmation: request failed",
+						zap.String("url", subURL),
+						zap.Error(err),
+					)
+					return
+				}
+				resp.Body.Close()
+			}()
 		}
 		return nil
 	}
@@ -252,15 +334,6 @@ func (h *WebhookHandler) parseSNS(payload map[string]any) []deliveryEvent {
 // --- Mailgun ---
 
 func (h *WebhookHandler) parseMailgun(payload map[string]any) []deliveryEvent {
-	signingKey := h.cfg.Providers.Email.Mailgun.WebhookSigningKey
-	if signingKey == "" {
-		signingKey = h.cfg.Providers.Email.Mailgun.APIKey
-	}
-	if signingKey != "" {
-		if !verifyMailgunHMAC(payload, signingKey) {
-			h.log.Warn("mailgun webhook HMAC verification failed")
-		}
-	}
 
 	eventData, _ := payload["event-data"].(map[string]any)
 	if eventData == nil {
@@ -412,12 +485,7 @@ func (h *WebhookHandler) parsePostmark(payload map[string]any) []deliveryEvent {
 
 func (h *WebhookHandler) parseTwilio(payload map[string]any, form url.Values, headers http.Header, reqURL string) []deliveryEvent {
 	// Verify HMAC-SHA1 if auth token is available and signature header is present
-	if authToken := h.cfg.Providers.SMS.Twilio.AuthToken; authToken != "" {
-		sig := headers.Get("X-Twilio-Signature")
-		if sig != "" && reqURL != "" && !verifyTwilioHMAC(authToken, sig, reqURL, form) {
-			h.log.Warn("twilio webhook HMAC verification failed")
-		}
-	}
+	// HMAC verification is handled at the handler level before parseProviderPayload is called
 
 	var ev deliveryEvent
 	ev.rawPayload = payload
@@ -555,12 +623,7 @@ func (h *WebhookHandler) parseMessageBird(payload map[string]any) []deliveryEven
 // --- Pusher Beams ---
 
 func (h *WebhookHandler) parsePusherBeams(body []byte, payload map[string]any, headers http.Header) []deliveryEvent {
-	if secretKey := h.cfg.Providers.Push.Pusher.SecretKey; secretKey != "" {
-		sig := headers.Get("X-Pusher-Signature")
-		if sig != "" && !verifyPusherHMAC(body, secretKey, sig) {
-			h.log.Warn("pusher beams webhook HMAC verification failed")
-		}
-	}
+	// HMAC verification is handled at the handler level before parseProviderPayload is called
 
 	meta, _ := payload["metadata"].(map[string]any)
 	if meta == nil {
@@ -723,6 +786,25 @@ func getFormOrPayload(form url.Values, payload map[string]any, key string) strin
 		}
 	}
 	return extractString(payload, key)
+}
+
+// isAllowedSNSURL returns true only for genuine AWS SNS subscription confirmation URLs.
+// Allowlist: https://sns.<region>.amazonaws.com/* (HTTPS only).
+func isAllowedSNSURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "https" {
+		return false
+	}
+	host := parsed.Hostname()
+	// Must match sns.<region>.amazonaws.com
+	if !strings.HasSuffix(host, ".amazonaws.com") {
+		return false
+	}
+	parts := strings.Split(host, ".")
+	return len(parts) >= 3 && parts[0] == "sns"
 }
 
 // extractString checks multiple keys in order and returns the first non-empty string value.

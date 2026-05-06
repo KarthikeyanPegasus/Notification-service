@@ -3,11 +3,10 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { Search, ChevronRight, Hash, Code, List } from 'lucide-react'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { OperationView } from './operation-view'
-
-const apiOrigin = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'
+import { useUserRole } from '@/hooks/use-user-role'
+import { getApiDocsVisibility } from '@/lib/api'
 
 export function APIDocs() {
   const [spec, setSpec] = useState<any>(null)
@@ -15,13 +14,23 @@ export function APIDocs() {
   const [error, setError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [hiddenEndpoints, setHiddenEndpoints] = useState<string[]>([])
+  
+  const role = useUserRole()
+  const isAdmin = role === 'admin'
 
   useEffect(() => {
-    fetch(`${apiOrigin}/v1/openapi.json`)
-      .then(res => res.json())
-      .then(data => {
+    const baseUrl = typeof window === 'undefined' ? process.env.NEXT_PUBLIC_API_URL ?? '' : ''
+    
+    Promise.all([
+      fetch(`${baseUrl}/v1/openapi.json`).then(res => res.json()),
+      getApiDocsVisibility()
+    ])
+      .then(([data, visibilityData]) => {
         setSpec(data)
+        setHiddenEndpoints(visibilityData.hidden_endpoints || [])
         setLoading(false)
+        
         // Auto-select first endpoint
         const firstPath = Object.keys(data.paths || {})[0]
         if (firstPath) {
@@ -55,11 +64,17 @@ export function APIDocs() {
   }, [spec])
 
   const filteredOperations = useMemo(() => {
-    return operations.filter(op => 
-      op.path.toLowerCase().includes(search.toLowerCase()) || 
-      op.summary?.toLowerCase().includes(search.toLowerCase())
-    )
-  }, [operations, search])
+    return operations.filter(op => {
+      const isHidden = hiddenEndpoints.includes(op.id)
+      // Non-admins cannot see hidden endpoints
+      if (!isAdmin && isHidden) return false
+      
+      return (
+        op.path.toLowerCase().includes(search.toLowerCase()) || 
+        op.summary?.toLowerCase().includes(search.toLowerCase())
+      )
+    })
+  }, [operations, search, hiddenEndpoints, isAdmin])
 
   const selectedOp = useMemo(() => 
     operations.find(op => op.id === selectedId),
@@ -89,38 +104,44 @@ export function APIDocs() {
             <div className="p-4 text-center text-xs text-muted-foreground">No matches found</div>
           ) : (
             <div className="space-y-1">
-              {filteredOperations.map((op) => (
-                <button
-                  key={op.id}
-                  onClick={() => setSelectedId(op.id)}
-                  className={cn(
-                    "w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left text-sm transition-all group",
-                    selectedId === op.id 
-                      ? "bg-primary text-primary-foreground shadow-sm" 
-                      : "hover:bg-accent text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <span className={cn(
-                    "text-[10px] font-bold uppercase w-12 text-center",
-                    selectedId === op.id ? "text-primary-foreground/90" : getMethodColor(op.method)
-                  )}>
-                    {op.method}
-                  </span>
-                  <div className="flex-1 truncate">
-                    <div className="font-medium truncate">{op.summary || op.path}</div>
-                    <div className={cn(
-                      "text-[10px] truncate opacity-70",
-                      selectedId === op.id ? "text-primary-foreground/70" : "text-muted-foreground"
+              {filteredOperations.map((op) => {
+                const isHidden = hiddenEndpoints.includes(op.id)
+                return (
+                  <button
+                    key={op.id}
+                    onClick={() => setSelectedId(op.id)}
+                    className={cn(
+                      "w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left text-sm transition-all group",
+                      selectedId === op.id 
+                        ? "bg-primary text-primary-foreground shadow-sm" 
+                        : "hover:bg-accent text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    <span className={cn(
+                      "text-[10px] font-bold uppercase w-12 text-center",
+                      selectedId === op.id ? "text-primary-foreground/90" : getMethodColor(op.method)
                     )}>
-                      {op.path}
+                      {op.method}
+                    </span>
+                    <div className="flex-1 truncate">
+                      <div className="font-medium truncate flex items-center gap-2">
+                        {op.summary || op.path}
+                      </div>
+                      <div className={cn(
+                        "text-[10px] truncate opacity-70",
+                        selectedId === op.id ? "text-primary-foreground/70" : "text-muted-foreground"
+                      )}>
+                        {op.path}
+                      </div>
                     </div>
-                  </div>
-                  <ChevronRight className={cn(
-                    "h-3 w-3 shrink-0 transition-transform",
-                    selectedId === op.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"
-                  )} />
-                </button>
-              ))}
+                    
+                    <ChevronRight className={cn(
+                      "h-3 w-3 shrink-0 transition-transform",
+                      selectedId === op.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"
+                    )} />
+                  </button>
+                )
+              })}
             </div>
           )}
         </div>

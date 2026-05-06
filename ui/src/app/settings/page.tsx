@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { PageHeader } from '@/components/shared/page-header'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card'
+import { useMaybeUser } from '@/components/auth/maybe-clerk'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
@@ -15,14 +16,17 @@ import {
   deleteVendorConfigScoped,
   getAuthUser,
 } from '@/lib/api'
+import { effectiveRole } from '@/lib/role'
 import type { VendorConfig } from '@/types'
 import { ClientScopeSelect } from '@/components/shared/client-scope-select'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Mail, MessageSquare, Bell, Save, Loader2, ShieldCheck, AlertCircle, Database, Plus, Upload, FileJson, CheckCircle2, MessageCircle, X, Trash2, Eye, EyeOff, Send } from 'lucide-react'
+import { Mail, MessageSquare, Bell, Save, Loader2, ShieldCheck, AlertCircle, Activity, AlertTriangle, Database, Plus, Upload, FileJson, CheckCircle2, MessageCircle, X, Trash2, Eye, EyeOff, Send, Globe, Code } from 'lucide-react'
 import { TestDeliveryForm } from '@/components/settings/test-delivery-form'
 import { VendorRateLimits } from '@/components/settings/vendor-rate-limits'
+import { VendorMigrateDialog } from '@/components/settings/vendor-migrate-dialog'
+import { VendorMigrationStatus } from '@/components/settings/vendor-migration-status'
 import { cn } from '@/lib/utils'
 
 const SOCIAL_VENDORS: { id: string; title: string; description: string; field: 'webhook' | 'api_key' }[] = [
@@ -34,10 +38,13 @@ const SOCIAL_VENDORS: { id: string; title: string; description: string; field: '
 
 export default function SettingsPage() {
   const queryClient = useQueryClient()
-  const role = getAuthUser()?.role
+  const { user: clerkUser } = useMaybeUser()
+  const legacyRole = getAuthUser()?.role
+  const role = effectiveRole({ clerkUser, legacyRole, fallback: 'support' })
   const canRemoveVendor = role === 'admin' || role === 'manager'
   const canEditRateLimits = role === 'admin' || role === 'manager' || role === 'dev'
   const canDeleteRateLimits = role === 'admin'
+  const canMigrateVendor = role === 'admin' || role === 'manager'
 
   const DEFAULT_SMS_ROUTING = {
     mode: 'backup' as 'backup' | 'round_robin' | 'publish_all' | 'only',
@@ -68,7 +75,7 @@ export default function SettingsPage() {
     error_rate_threshold: 0,
     min_requests: 20,
   }
-  const [activeTab, setActiveTab] = useState<'sms' | 'email' | 'push' | 'social' | 'store'>('sms')
+  const [activeTab, setActiveTab] = useState<'sms' | 'email' | 'push' | 'websocket' | 'social' | 'store' | 'api'>('sms')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -91,11 +98,11 @@ export default function SettingsPage() {
 
   const [emailConfig, setEmailConfig] = useState({
     primary: 'smtp',
-    ses: { region: '', access_key_id: '', access_secret: '', secret_access_key: '', from_address: '', from_name: '', smtp_username: '', smtp_password: '' },
-    smtp: { host: '', port: 587, username: '', password: '', from: '' },
-    mailgun: { domain: '', api_key: '', from: '' },
-    sendgrid: { api_key: '', from_email: '', from_name: '' },
-    postmark: { server_token: '', from_email: '', from_name: '' },
+    ses: { region: '', access_key_id: '', access_secret: '', secret_access_key: '', from_address: '', from_name: '', reply_to: '', smtp_username: '', smtp_password: '' },
+    smtp: { host: '', port: 587, username: '', password: '', from: '', reply_to: '' },
+    mailgun: { domain: '', api_key: '', from: '', reply_to: '' },
+    sendgrid: { api_key: '', from_email: '', from_name: '', reply_to: '' },
+    postmark: { server_token: '', from_email: '', from_name: '', reply_to: '' },
   })
 
   const [sesAuthMode, setSesAuthMode] = useState<'smtp' | 'keys'>('smtp')
@@ -403,6 +410,18 @@ export default function SettingsPage() {
           </div>
         </button>
         <button
+          onClick={() => setActiveTab('websocket')}
+          className={cn(
+            "pb-3 px-2 text-sm font-medium transition-colors border-b-2",
+            activeTab === 'websocket' ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <Globe className="h-4 w-4" />
+            WebSocket
+          </div>
+        </button>
+        <button
           onClick={() => setActiveTab('social')}
           className={cn(
             "pb-3 px-2 text-sm font-medium transition-colors border-b-2",
@@ -424,6 +443,18 @@ export default function SettingsPage() {
           <div className="flex items-center gap-2">
             <Database className="h-4 w-4" />
             Config Store
+          </div>
+        </button>
+        <button
+          onClick={() => setActiveTab('api')}
+          className={cn(
+            "pb-3 px-2 text-sm font-medium transition-colors border-b-2",
+            activeTab === 'api' ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <Code className="h-4 w-4" />
+            API Settings
           </div>
         </button>
       </div>
@@ -603,6 +634,12 @@ export default function SettingsPage() {
                   canEdit={canEditRateLimits}
                   canDelete={canDeleteRateLimits}
                 />
+              )}
+
+              {canMigrateVendor && configuredSmsVendors.length > 0 && (
+                <div className="flex justify-end">
+                  <VendorMigrateDialog defaultChannel="sms" apiKeyId={apiKeyId} />
+                </div>
               )}
 
             {configs.some(c => c.vendor_type === 'twilio') && (
@@ -878,6 +915,8 @@ export default function SettingsPage() {
                  <Button variant="link" size="sm" className="mt-2" onClick={() => (window as any).location.href = '/app-store'}>Connect a provider in the App Store</Button>
               </div>
             )}
+
+            <VendorMigrationStatus apiKeyId={apiKeyId} channel="sms" />
           </div>
         )}
 
@@ -1061,6 +1100,12 @@ export default function SettingsPage() {
                 />
               )}
 
+              {canMigrateVendor && configuredEmailVendors.length > 0 && (
+                <div className="flex justify-end">
+                  <VendorMigrateDialog defaultChannel="email" apiKeyId={apiKeyId} />
+                </div>
+              )}
+
             {configs.some(c => c.vendor_type === 'ses') && (
               <Card>
                 <CardHeader>
@@ -1084,6 +1129,14 @@ export default function SettingsPage() {
                       <Input 
                         value={emailConfig.ses?.from_address || ''} 
                         onChange={e => setEmailConfig({...emailConfig, ses: {...emailConfig.ses, from_address: e.target.value}})}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-muted-foreground uppercase">Reply-To (optional)</label>
+                      <Input
+                        value={emailConfig.ses?.reply_to || ''}
+                        onChange={e => setEmailConfig({...emailConfig, ses: {...emailConfig.ses, reply_to: e.target.value}})}
+                        placeholder="support@example.com"
                       />
                     </div>
                   </div>
@@ -1126,7 +1179,33 @@ export default function SettingsPage() {
 
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-muted-foreground uppercase">Authentication method</label>
-                    <Select value={sesAuthMode} onValueChange={(v) => setSesAuthMode(v as any)}>
+                    <Select 
+                      value={sesAuthMode} 
+                      onValueChange={(v) => {
+                        setSesAuthMode(v as any)
+                        // Clear the other mode's credentials to avoid confusion on the backend
+                        if (v === 'keys') {
+                          setEmailConfig(prev => ({
+                            ...prev,
+                            ses: {
+                              ...prev.ses,
+                              smtp_username: '',
+                              smtp_password: ''
+                            }
+                          }))
+                        } else {
+                          setEmailConfig(prev => ({
+                            ...prev,
+                            ses: {
+                              ...prev.ses,
+                              access_key_id: '',
+                              access_secret: '',
+                              secret_access_key: ''
+                            }
+                          }))
+                        }
+                      }}
+                    >
                       <SelectTrigger><SelectValue placeholder="Select auth method" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="smtp">SMTP credentials (recommended)</SelectItem>
@@ -1204,7 +1283,21 @@ export default function SettingsPage() {
                         Remove
                       </Button>
                     )}
-                    <Button disabled={saving} onClick={() => handleSave('ses', emailConfig.ses)}>
+                    <Button 
+                      disabled={saving} 
+                      onClick={() => {
+                        const payload: any = { ...emailConfig.ses }
+                        if (sesAuthMode === 'keys') {
+                          delete payload.smtp_username
+                          delete payload.smtp_password
+                        } else {
+                          delete payload.access_key_id
+                          delete payload.access_secret
+                          delete payload.secret_access_key
+                        }
+                        handleSave('ses', payload)
+                      }}
+                    >
                       {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
                       Save SES Settings
                     </Button>
@@ -1269,6 +1362,14 @@ export default function SettingsPage() {
                       value={emailConfig.smtp.from} 
                       onChange={e => setEmailConfig({...emailConfig, smtp: {...emailConfig.smtp, from: e.target.value}})}
                       placeholder="noreply@notifyhub.io"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-muted-foreground uppercase">Reply-To (optional)</label>
+                    <Input
+                      value={emailConfig.smtp.reply_to || ''}
+                      onChange={e => setEmailConfig({...emailConfig, smtp: {...emailConfig.smtp, reply_to: e.target.value}})}
+                      placeholder="support@example.com"
                     />
                   </div>
                 </CardContent>
@@ -1341,6 +1442,14 @@ export default function SettingsPage() {
                       placeholder="NotifyHub <noreply@mg.example.com>"
                     />
                   </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-muted-foreground uppercase">Reply-To (optional)</label>
+                    <Input
+                      value={String(emailConfig.mailgun?.reply_to || '')}
+                      onChange={(e) => setEmailConfig({ ...emailConfig, mailgun: { ...emailConfig.mailgun, reply_to: e.target.value } })}
+                      placeholder="support@example.com"
+                    />
+                  </div>
                 </CardContent>
                 <CardFooter className="bg-muted/50 py-3 flex justify-end">
                   <div className="flex items-center gap-2">
@@ -1404,6 +1513,14 @@ export default function SettingsPage() {
                       value={String(emailConfig.sendgrid?.from_name || '')}
                       onChange={(e) => setEmailConfig({ ...emailConfig, sendgrid: { ...emailConfig.sendgrid, from_name: e.target.value } })}
                       placeholder="NotifyHub"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-muted-foreground uppercase">Reply-To (optional)</label>
+                    <Input
+                      value={String(emailConfig.sendgrid?.reply_to || '')}
+                      onChange={(e) => setEmailConfig({ ...emailConfig, sendgrid: { ...emailConfig.sendgrid, reply_to: e.target.value } })}
+                      placeholder="support@example.com"
                     />
                   </div>
                 </CardContent>
@@ -1471,6 +1588,14 @@ export default function SettingsPage() {
                       placeholder="NotifyHub"
                     />
                   </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-muted-foreground uppercase">Reply-To (optional)</label>
+                    <Input
+                      value={String(emailConfig.postmark?.reply_to || '')}
+                      onChange={(e) => setEmailConfig({ ...emailConfig, postmark: { ...emailConfig.postmark, reply_to: e.target.value } })}
+                      placeholder="support@example.com"
+                    />
+                  </div>
                 </CardContent>
                 <CardFooter className="bg-muted/50 py-3 flex justify-end">
                   <div className="flex items-center gap-2">
@@ -1508,6 +1633,8 @@ export default function SettingsPage() {
                  <Button variant="link" size="sm" className="mt-2" onClick={() => (window as any).location.href = '/app-store'}>Connect a provider in the App Store</Button>
               </div>
             )}
+
+            <VendorMigrationStatus apiKeyId={apiKeyId} channel="email" />
           </div>
         )}
 
@@ -1673,6 +1800,12 @@ export default function SettingsPage() {
                   canEdit={canEditRateLimits}
                   canDelete={canDeleteRateLimits}
                 />
+              )}
+
+              {canMigrateVendor && configuredPushVendors.length > 0 && (
+                <div className="flex justify-end">
+                  <VendorMigrateDialog defaultChannel="push" apiKeyId={apiKeyId} />
+                </div>
               )}
 
             {configs.some(c => c.vendor_type === 'fcm') && (
@@ -1865,6 +1998,35 @@ export default function SettingsPage() {
                  <Button variant="link" size="sm" className="mt-2" onClick={() => (window as any).location.href = '/app-store'}>Connect a provider in the App Store</Button>
               </div>
             )}
+
+            <VendorMigrationStatus apiKeyId={apiKeyId} channel="push" />
+          </div>
+        )}
+
+        {activeTab === 'websocket' && (
+          <div className="grid gap-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2">WebSocket Configuration</CardTitle>
+                <CardDescription>WebSocket is an internal channel for real-time notifications. No external vendor configuration is required.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between rounded-lg border p-4">
+                  <div>
+                    <p className="text-sm font-medium">WebSocket Channel</p>
+                    <p className="text-xs text-muted-foreground">Internal channel for real-time in-app notifications.</p>
+                  </div>
+                  <Badge variant="default" className="text-xs">Enabled</Badge>
+                </div>
+                <div className="flex items-center justify-between rounded-lg border p-4">
+                  <div>
+                    <p className="text-sm font-medium">Delivery Method</p>
+                    <p className="text-xs text-muted-foreground">Real-time push to connected WebSocket clients.</p>
+                  </div>
+                  <Badge variant="secondary" className="text-xs">Internal</Badge>
+                </div>
+              </CardContent>
+            </Card>
           </div>
         )}
 
@@ -2236,10 +2398,36 @@ export default function SettingsPage() {
               </CardContent>
             </Card>
           </div>
-        )}
+          )}
       </>
     )}
+        {activeTab === 'api' && (
+          <div className="grid gap-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2">API Documentation Settings</CardTitle>
+                <CardDescription>Manage the visibility of endpoints in the public API documentation.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex flex-col items-center justify-center py-10 text-center">
+                  <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center mb-4">
+                    <Code className="h-6 w-6 text-primary" />
+                  </div>
+                  <h3 className="text-lg font-medium">Public API Reference</h3>
+                  <p className="text-sm text-muted-foreground max-w-md mt-2 mb-6">
+                    You can manage which endpoints are visible to the public by visiting the API Reference page. From there, you can toggle the visibility of individual endpoints directly in the sidebar.
+                  </p>
+                  <Button variant="default" asChild>
+                    <a href="/docs">Go to API Reference</a>
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
       </div>
     </div>
   )
 }
+

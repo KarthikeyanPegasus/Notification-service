@@ -9,7 +9,6 @@ import {
   Clock,
   Menu,
   X,
-  Zap,
   Settings,
   ShoppingBag,
   ShieldAlert,
@@ -20,14 +19,18 @@ import {
   LogOut,
   Moon,
   Sun,
+  ChevronDown,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import Image from 'next/image'
+import { useMaybeClerk, useMaybeUser } from '@/components/auth/maybe-clerk'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
   clearAuthToken,
   getAuthUser,
 } from '@/lib/api'
+import { effectiveRole, type Role } from '@/lib/role'
 import { getStoredTheme, toggleTheme, type ThemeMode } from '@/lib/theme'
 import {
   DropdownMenu,
@@ -35,39 +38,77 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 
 const STORAGE_KEY = 'notifyhub-sidebar-collapsed'
 
-type Role = 'admin' | 'manager' | 'dev' | 'support'
-type NavItem = { href: string; label: string; icon: React.ElementType; roles: Role[]; children?: NavItem[] }
+type NavItem = { href: string; label: string; icon: React.ElementType; roles: Role[]; children?: NavItem[]; exact?: boolean }
+type NavSection = { id: string; label: string; icon: React.ElementType; items: NavItem[] }
 
-const navItems: NavItem[] = [
-  { href: '/admin', label: 'Admin Dashboard', icon: ShieldAlert, roles: ['admin'] },
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'manager', 'dev', 'support'] },
-  { href: '/notifications', label: 'Notifications', icon: Bell, roles: ['admin', 'manager', 'dev', 'support'] },
-  { href: '/reports', label: 'Reports', icon: BarChart3, roles: ['admin', 'manager', 'dev', 'support'] },
-
-  { href: '/app-store', label: 'App Store', icon: ShoppingBag, roles: ['admin', 'manager', 'dev'] },
-  { href: '/templates', label: 'Templates', icon: Bell, roles: ['admin', 'manager', 'dev'] },
-  { href: '/scheduled', label: 'Scheduled', icon: Clock, roles: ['admin', 'manager', 'dev', 'support'] },
-  { href: '/settings', label: 'Settings', icon: Settings, roles: ['admin', 'manager', 'dev'] },
-
-  { href: '/clients', label: 'Client management', icon: KeyRound, roles: ['admin'] },
-  { href: '/people', label: 'People', icon: Users, roles: ['admin'] },
-  { href: '/governance/suppressions', label: 'Suppressions', icon: ShieldAlert, roles: ['admin', 'support'] },
-  { href: '/governance/opt-outs', label: 'Opt-outs', icon: ShieldAlert, roles: ['admin', 'support'] },
-
+const navSections: NavSection[] = [
   {
-    href: '/docs',
-    label: 'Docs',
+    id: 'monitoring',
+    label: 'Monitor & analyze',
+    icon: LayoutDashboard,
+    items: [
+      { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'manager', 'dev', 'support'] },
+      { href: '/notifications', label: 'Notifications', icon: Bell, roles: ['admin', 'manager', 'dev', 'support'] },
+      { href: '/reports', label: 'Reports', icon: BarChart3, roles: ['admin', 'manager', 'dev'] },
+    ],
+  },
+  {
+    id: 'delivery',
+    label: 'Create & deliver',
+    icon: Bell,
+    items: [
+      { href: '/templates', label: 'Templates', icon: Bell, roles: ['admin', 'manager', 'dev'] },
+      { href: '/scheduled', label: 'Scheduled', icon: Clock, roles: ['admin', 'manager', 'dev', 'support'] },
+      { href: '/app-store', label: 'App Store', icon: ShoppingBag, roles: ['admin', 'manager', 'dev'] },
+    ],
+  },
+  {
+    id: 'governance',
+    label: 'Governance & ops',
+    icon: ShieldAlert,
+    items: [
+      { href: '/governance/suppressions', label: 'Suppressions', icon: ShieldAlert, roles: ['admin', 'manager', 'dev', 'support'] },
+      { href: '/governance/opt-outs', label: 'Opt-outs', icon: ShieldAlert, roles: ['admin', 'manager', 'dev', 'support'] },
+      { href: '/admin/dlq', label: 'Dead-Letter Queue', icon: ShieldAlert, roles: ['admin', 'manager', 'dev', 'support'] },
+    ],
+  },
+  {
+    id: 'configuration',
+    label: 'Configure workspace',
+    icon: Settings,
+    items: [
+      { href: '/settings', label: 'Settings', icon: Settings, roles: ['admin', 'manager', 'dev'] },
+      { href: '/clients', label: 'Client management', icon: KeyRound, roles: ['admin', 'manager', 'dev'] },
+      { href: '/people', label: 'People', icon: Users, roles: ['admin', 'dev'] },
+      { href: '/admin', label: 'Admin Dashboard', icon: ShieldAlert, roles: ['admin'], exact: true },
+      { href: '/admin/api-settings', label: 'API Settings', icon: KeyRound, roles: ['admin'] },
+    ],
+  },
+  {
+    id: 'developer',
+    label: 'Developer resources',
     icon: Book,
-    roles: ['admin', 'dev'],
-    children: [
-      { href: '/docs/api', label: 'API Reference', icon: Book, roles: ['admin', 'dev'] },
-      { href: '/docs/sdk/go', label: 'SDK — Go', icon: Book, roles: ['admin', 'dev'] },
-      { href: '/docs/sdk/dotnet', label: 'SDK — .NET', icon: Book, roles: ['admin', 'dev'] },
+    items: [
+      {
+        href: '/docs',
+        label: 'Docs',
+        icon: Book,
+        roles: ['admin', 'dev'],
+        children: [
+          { href: '/docs', label: 'Overview', icon: Book, roles: ['admin', 'dev'], exact: true },
+          { href: '/docs/api', label: 'API Reference', icon: Book, roles: ['admin', 'dev'] },
+          { href: '/docs/sdk/go', label: 'SDK — Go', icon: Book, roles: ['admin', 'dev'] },
+          { href: '/docs/sdk/dotnet', label: 'SDK — .NET', icon: Book, roles: ['admin', 'dev'] },
+        ],
+      },
     ],
   },
 ]
@@ -108,6 +149,65 @@ function NavLink({
   )
 }
 
+function isItemActive(item: NavItem, pathname: string): boolean {
+  const selfActive = item.exact
+    ? pathname === item.href
+    : pathname === item.href || pathname.startsWith(item.href + '/')
+  if (selfActive) return true
+  return item.children?.some((child) => isItemActive(child, pathname)) ?? false
+}
+
+function filterNavItemsByRole(items: NavItem[], role: Role): NavItem[] {
+  return items.flatMap((item) => {
+    const children = item.children ? filterNavItemsByRole(item.children, role) : undefined
+    if (!item.roles.includes(role) && !children?.length) return []
+    return [{ ...item, children }]
+  })
+}
+
+function CompactNavMenuItem({
+  item,
+  pathname,
+  onClick,
+}: {
+  item: NavItem
+  pathname: string
+  onClick?: () => void
+}) {
+  const Icon = item.icon
+  const active = isItemActive(item, pathname)
+
+  if (item.children?.length) {
+    return (
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger className={cn(active && 'bg-accent text-accent-foreground')}>
+          <Icon className="mr-2 h-4 w-4" aria-hidden />
+          {item.label}
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent className="w-48">
+          {item.children.map((child) => (
+            <CompactNavMenuItem
+              key={child.href}
+              item={child}
+              pathname={pathname}
+              onClick={onClick}
+            />
+          ))}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+    )
+  }
+
+  return (
+    <DropdownMenuItem asChild className={cn(active && 'bg-accent text-accent-foreground')}>
+      <Link href={item.href} onClick={onClick}>
+        <Icon className="mr-2 h-4 w-4" aria-hidden />
+        {item.label}
+      </Link>
+    </DropdownMenuItem>
+  )
+}
+
 function NavGroup({
   item,
   pathname,
@@ -119,8 +219,14 @@ function NavGroup({
   compact: boolean
   onClick?: () => void
 }) {
-  const isParentActive = pathname === item.href || pathname.startsWith(item.href + '/')
-  if (!item.children) {
+  const isParentActive = isItemActive(item, pathname)
+  const [open, setOpen] = useState(isParentActive)
+
+  useEffect(() => {
+    if (isParentActive) setOpen(true)
+  }, [isParentActive])
+
+  if (!item.children?.length) {
     return (
       <NavLink
         href={item.href}
@@ -132,27 +238,134 @@ function NavGroup({
       />
     )
   }
+
+  const Icon = item.icon
+
   return (
     <div>
-      <NavLink
-        href={item.href}
-        label={item.label}
-        icon={item.icon}
-        active={isParentActive && !item.children.some(c => pathname.startsWith(c.href))}
-        compact={compact}
-        onClick={onClick}
-      />
-      {(isParentActive || !compact) && (
-        <div className={cn('space-y-0.5 mt-0.5', compact && 'hidden')}>
-          {item.children.map(child => (
+      <button
+        type="button"
+        title={item.label}
+        onClick={() => setOpen((value) => !value)}
+        className={cn(
+          'flex w-full items-center gap-3 rounded-md py-2 text-sm font-medium transition-colors',
+          compact ? 'justify-center px-2' : 'px-3',
+          isParentActive
+            ? 'bg-accent text-accent-foreground'
+            : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+        )}
+        aria-expanded={open}
+      >
+        <Icon className="h-4 w-4 shrink-0" aria-hidden />
+        <span className={cn('flex-1 text-left', compact && 'sr-only')}>{item.label}</span>
+        {!compact && (
+          <ChevronDown
+            className={cn('h-4 w-4 shrink-0 transition-transform', open && 'rotate-180')}
+            aria-hidden
+          />
+        )}
+      </button>
+      {open && !compact && (
+        <div className="mt-0.5 space-y-0.5">
+          {item.children.map((child) => (
             <NavLink
               key={child.href}
               href={child.href}
               label={child.label}
               icon={child.icon}
-              active={pathname === child.href || pathname.startsWith(child.href + '/')}
+              active={isItemActive(child, pathname)}
               compact={compact}
               indent
+              onClick={onClick}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function NavSectionGroup({
+  section,
+  pathname,
+  compact,
+  onClick,
+}: {
+  section: NavSection
+  pathname: string
+  compact: boolean
+  onClick?: () => void
+}) {
+  const isSectionActive = section.items.some((item) => isItemActive(item, pathname))
+  const [open, setOpen] = useState(isSectionActive)
+  const Icon = section.icon
+
+  useEffect(() => {
+    if (isSectionActive) setOpen(true)
+  }, [isSectionActive])
+
+  if (compact) {
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            title={section.label}
+            className={cn(
+              'flex w-full items-center justify-center rounded-md px-2 py-2 text-sm font-medium transition-colors outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring',
+              isSectionActive
+                ? 'bg-primary text-primary-foreground'
+                : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+            )}
+            aria-label={section.label}
+          >
+            <Icon className="h-4 w-4 shrink-0" aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="right" align="start" className="w-56">
+          <DropdownMenuLabel>{section.label}</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {section.items.map((item) => (
+            <CompactNavMenuItem
+              key={item.href}
+              item={item}
+              pathname={pathname}
+              onClick={onClick}
+            />
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    )
+  }
+
+  return (
+    <div className="space-y-1">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className={cn(
+          'flex w-full items-center gap-2 rounded-md px-3 py-2 text-xs font-semibold uppercase tracking-wide transition-colors',
+          isSectionActive
+            ? 'text-foreground hover:bg-accent'
+            : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+        )}
+        aria-expanded={open}
+      >
+        <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        <span className="flex-1 text-left">{section.label}</span>
+        <ChevronDown
+          className={cn('h-4 w-4 shrink-0 transition-transform', open && 'rotate-180')}
+          aria-hidden
+        />
+      </button>
+      {open && (
+        <div className="space-y-1">
+          {section.items.map((item) => (
+            <NavGroup
+              key={item.href}
+              item={item}
+              pathname={pathname}
+              compact={compact}
               onClick={onClick}
             />
           ))}
@@ -170,6 +383,7 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
   /** While resting collapsed, hover temporarily expands until mouse leaves. */
   const [hoverExpanded, setHoverExpanded] = useState(false)
+  const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const [theme, setTheme] = useState<ThemeMode>(() => {
     if (typeof document !== 'undefined' && document.documentElement.classList.contains('dark')) return 'dark'
     return 'light'
@@ -197,6 +411,15 @@ export function Sidebar() {
     return () => window.removeEventListener('notifyhub-theme-changed', onChanged as any)
   }, [])
 
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (hoverTimeoutRef.current) {
+        clearTimeout(hoverTimeoutRef.current)
+      }
+    }
+  }, [])
+
   const setCollapsedPersist = (next: boolean) => {
     setCollapsed(next)
     setHoverExpanded(false)
@@ -208,16 +431,31 @@ export function Sidebar() {
   }
 
   const compactNav = collapsed && !hoverExpanded
+  const { user: clerkUser } = useMaybeUser()
+  const clerk = useMaybeClerk()
   const authUser = getAuthUser()
-  const role = (authUser?.role ?? 'support') as Role
+  const role = effectiveRole({ clerkUser, legacyRole: authUser?.role, fallback: 'support' })
+
+  // Use Clerk user info if available, fall back to legacy localStorage
+  const effectiveName = clerkUser?.fullName ?? clerkUser?.username ?? authUser?.name ?? 'Account'
+  const effectiveEmail = clerkUser?.primaryEmailAddress?.emailAddress ?? authUser?.email ?? ''
 
   const logout = () => {
     clearAuthToken()
-    router.replace('/login')
+    if (clerkUser) {
+      clerk.signOut()
+    } else {
+      router.replace('/login')
+    }
   }
 
-  const visibleNavItems = useMemo(() => {
-    return navItems.filter((i) => i.roles.includes(role))
+  const visibleNavSections = useMemo(() => {
+    return navSections
+      .map((section) => ({
+        ...section,
+        items: filterNavItemsByRole(section.items, role),
+      }))
+      .filter((section) => section.items.length > 0)
   }, [role])
 
   // Never return early before hooks run; keep this after hooks to avoid hook-order issues.
@@ -228,7 +466,7 @@ export function Sidebar() {
       <div
         className={cn(
           'flex items-center gap-2 border-b py-5',
-          opts.compact ? 'justify-center px-2' : 'px-4',
+          opts.compact ? 'justify-center px-2' : '',
         )}
       >
         <button
@@ -241,18 +479,35 @@ export function Sidebar() {
           aria-label={collapsed ? 'Expand sidebar (stay open)' : 'Collapse sidebar to icon rail'}
           aria-expanded={!collapsed}
         >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary">
-            <Zap className="h-4 w-4 text-primary-foreground" aria-hidden />
-          </span>
-          {!opts.compact && <span className="font-semibold text-foreground truncate">NotifyHub</span>}
+          {opts.compact ? (
+            <span className="relative shrink-0 h-10 w-10">
+              <Image
+                src="/assets/logo_small.png"
+                alt="NotifyHub"
+                fill
+                className="object-contain"
+                priority
+              />
+            </span>
+          ) : (
+            <span className="relative w-full h-10">
+              <Image
+                src="/assets/logo_large.png"
+                alt="NotifyHub"
+                fill
+                className="object-cover"
+                priority
+              />
+            </span>
+          )}
         </button>
       </div>
 
-      <nav className="flex-1 space-y-1 overflow-y-auto overflow-x-hidden p-3">
-        {visibleNavItems.map((item) => (
-          <NavGroup
-            key={item.href}
-            item={item}
+      <nav className="flex-1 space-y-4 overflow-y-auto overflow-x-hidden p-3">
+        {visibleNavSections.map((section) => (
+          <NavSectionGroup
+            key={section.id}
+            section={section}
             pathname={pathname}
             compact={opts.compact}
             onClick={() => setMobileOpen(false)}
@@ -274,8 +529,8 @@ export function Sidebar() {
               <UserCircle2 className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden />
               {!opts.compact && (
                 <div className="min-w-0 flex-1 text-left">
-                  <p className="text-sm font-medium truncate">{authUser?.name ?? 'Account'}</p>
-                  <p className="text-xs text-muted-foreground truncate">{authUser?.email ?? role}</p>
+                  <p className="text-sm font-medium truncate">{effectiveName}</p>
+                  <p className="text-xs text-muted-foreground truncate">{effectiveEmail ?? role}</p>
                 </div>
               )}
             </button>
@@ -283,10 +538,10 @@ export function Sidebar() {
           <DropdownMenuContent align={opts.compact ? 'center' : 'start'} side="top" className="w-56">
             <DropdownMenuLabel>
               <div className="min-w-0">
-                <p className="text-sm font-medium truncate">{authUser?.name ?? 'Account'}</p>
+                <p className="text-sm font-medium truncate">{effectiveName}</p>
                 <p className="text-xs text-muted-foreground truncate">
-                  {authUser?.email ?? ''}
-                  {authUser?.email ? ' • ' : ''}
+                  {effectiveEmail}
+                  {effectiveEmail ? ' • ' : ''}
                   {role}
                 </p>
               </div>
@@ -337,10 +592,20 @@ export function Sidebar() {
           collapsed && hoverExpanded && 'shadow-xl z-40',
         )}
         onMouseEnter={() => {
+          // Clear any pending collapse timeout
+          if (hoverTimeoutRef.current) {
+            clearTimeout(hoverTimeoutRef.current)
+            hoverTimeoutRef.current = null
+          }
           if (collapsed) setHoverExpanded(true)
         }}
         onMouseLeave={() => {
-          if (collapsed) setHoverExpanded(false)
+          // Add a small delay before collapsing to prevent flickering when dropdown opens
+          if (collapsed) {
+            hoverTimeoutRef.current = setTimeout(() => {
+              setHoverExpanded(false)
+            }, 150)
+          }
         }}
       >
         {navContent({ compact: compactNav })}

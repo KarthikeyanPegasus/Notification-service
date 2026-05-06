@@ -1,0 +1,10 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.27.2
+    hooks:
+      - id: gitleaks
+        name: gitleaks (detect hardcoded secrets)
+        description: Detect hardcoded secrets before they reach version control
+        entry: gitleaks protect --staged --redact --verbose
+        language: golang
+        pass_filenames: false

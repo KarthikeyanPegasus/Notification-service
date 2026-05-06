@@ -7,6 +7,10 @@ metadata:
   labels:
     {{- include "notification-system.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
+  {{- with .Values.api.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.api.service.type }}
   ports:
@@ -15,8 +19,32 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "notification-system.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: api
+    {{- include "notification-system.componentLabels" (list . "api") | nindent 4 }}
+{{- end }}
+---
+{{- if .Values.worker.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "notification-system.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "notification-system.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+  {{- with .Values.worker.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # Worker HTTP is internal-only (health + worker state).
+  type: {{ .Values.worker.service.type }}
+  ports:
+    - port: {{ .Values.worker.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "notification-system.componentLabels" (list . "worker") | nindent 4 }}
 {{- end }}
 ---
 {{- if .Values.ui.enabled }}
@@ -28,6 +56,10 @@ metadata:
   labels:
     {{- include "notification-system.labels" . | nindent 4 }}
     app.kubernetes.io/component: ui
+  {{- with .Values.ui.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.ui.service.type }}
   ports:
@@ -36,6 +68,5 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "notification-system.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: ui
+    {{- include "notification-system.componentLabels" (list . "ui") | nindent 4 }}
 {{- end }}

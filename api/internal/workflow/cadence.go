@@ -158,6 +158,10 @@ func (e *CadenceEngine) ProviderName() string {
 	return "cadence"
 }
 
+func (e *CadenceEngine) Identity() string {
+	return "cadence|" + e.hostPort + "|" + e.domain
+}
+
 func (e *CadenceEngine) Close() {
 	e.mu.Lock()
 	defer e.mu.Unlock()

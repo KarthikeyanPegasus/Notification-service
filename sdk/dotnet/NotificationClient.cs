@@ -44,16 +44,11 @@ namespace NotificationService.Sdk
         // ── Auth helpers ──────────────────────────────────────────────────────
 
         /// <summary>
-        /// Authenticates with email + password and stores the returned JWT automatically.
+        /// Legacy login helper is disabled.
+        /// Authentication is managed by Clerk; use UseBearerToken(...) with a Clerk session JWT.
         /// </summary>
-        public async Task<LoginResponse> LoginAsync(string email, string password, CancellationToken ct = default)
-        {
-            var resp = await DoRequestAsync<LoginResponse>("POST", "/auth/login",
-                new LoginRequest { Email = email, Password = password }, ct);
-            if (!string.IsNullOrEmpty(resp.Token))
-                _bearerToken = resp.Token;
-            return resp;
-        }
+        public Task<LoginResponse> LoginAsync(string email, string password, CancellationToken ct = default)
+            => throw new NotSupportedException("/auth/login is no longer supported. Authenticate with Clerk and pass a bearer token via UseBearerToken(...).");
 
         // ── API key management ────────────────────────────────────────────────
 

@@ -71,7 +71,7 @@ func (h *TestDeliveryHandler) Send(c *gin.Context) {
 		ForcedVendor:   vendorType,
 	}
 
-	res, err := h.notifSvc.Send(ctx, sendReq, "test-delivery-handler", apiKeyID)
+	res, err := h.notifSvc.Send(ctx, sendReq, "test-delivery-handler", apiKeyID, c.GetString("request_id"))
 	if err != nil {
 		h.log.Warn("test delivery workflow trigger failed", zap.String("vendor", vendorType), zap.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{

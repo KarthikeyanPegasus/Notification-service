@@ -1,0 +1,73 @@
+Thank you for installing {{ .Chart.Name }} v{{ .Chart.AppVersion }}!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Release : {{ .Release.Name }}
+  Namespace: {{ .Release.Namespace }}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▶ SERVICES DEPLOYED
+
+{{- if .Values.api.enabled }}
+  API      → {{ include "notification-system.fullname" . }}-api:{{ .Values.api.service.port }}
+{{- end }}
+{{- if .Values.worker.enabled }}
+  Worker   → {{ include "notification-system.fullname" . }}-worker:{{ .Values.worker.service.port }} (internal)
+{{- end }}
+{{- if .Values.ui.enabled }}
+  UI       → {{ include "notification-system.fullname" . }}-ui:{{ .Values.ui.service.port }}
+{{- end }}
+
+▶ ACCESS THE UI
+
+{{- if .Values.ingress.enabled }}
+  {{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+  {{- end }}
+{{- else if eq .Values.ui.service.type "NodePort" }}
+  export NODE_PORT=$(kubectl get svc {{ include "notification-system.fullname" . }}-ui -n {{ .Release.Namespace }} -o jsonpath='{.spec.ports[0].nodePort}')
+  export NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
+  echo "UI: http://$NODE_IP:$NODE_PORT"
+{{- else }}
+  kubectl port-forward svc/{{ include "notification-system.fullname" . }}-ui {{ .Values.ui.service.port }}:{{ .Values.ui.service.port }} -n {{ .Release.Namespace }}
+  echo "UI: http://localhost:{{ .Values.ui.service.port }}"
+{{- end }}
+
+▶ ACCESS THE API
+
+{{- if not .Values.ingress.enabled }}
+  kubectl port-forward svc/{{ include "notification-system.fullname" . }}-api {{ .Values.api.service.port }}:{{ .Values.api.service.port }} -n {{ .Release.Namespace }}
+  echo "API: http://localhost:{{ .Values.api.service.port }}"
+  echo "OpenAPI spec: http://localhost:{{ .Values.api.service.port }}/v1/openapi.yaml"
+{{- end }}
+
+▶ CHECK HEALTH
+
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+▶ CONFIGURATION NOTES
+
+{{- if not .Values.secrets.jwtSecret }}
+  ⚠  JWT_SECRET is not set.
+     Set secrets.jwtSecret to a strong random value before going to production.
+{{- end }}
+{{- if not .Values.secrets.vendorConfigEncryptionKey }}
+  ⚠  VENDOR_CONFIG_ENCRYPTION_KEY is not set.
+     Provider credentials stored in the DB will not be encrypted.
+     Set secrets.vendorConfigEncryptionKey to a 32-byte base64 string.
+{{- end }}
+{{- if .Values.postgresql.enabled }}
+  ℹ  PostgreSQL is deployed as a subchart. To use an external database:
+       postgresql.enabled=false  externalDatabase.host=<your-host>
+{{- end }}
+{{- if .Values.redis.enabled }}
+  ℹ  Redis is deployed as a subchart. To use an external Redis:
+       redis.enabled=false  externalRedis.host=<your-host>
+{{- end }}
+{{- if eq .Values.config.pubsub.mode "kafka" }}
+  ℹ  Pub/Sub mode is KAFKA. Make sure externalKafka.brokers (or config.pubsub.kafkaBrokers)
+     points to your Kafka/Redpanda cluster and kafkaInit.enabled=true to create topics.
+{{- end }}
+{{- if eq .Values.config.cadence.mode "temporal" }}
+  ℹ  Workflow engine is TEMPORAL. Set externalTemporal.host to your Temporal server.
+     Deploy Temporal separately: helm install temporal temporalio/temporal
+{{- end }}

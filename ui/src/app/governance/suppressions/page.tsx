@@ -1,3 +1,5 @@
+'use client'
+
 import { SuppressionTable } from '@/components/governance/suppression-table'
 
 export default function SuppressionsPage() {

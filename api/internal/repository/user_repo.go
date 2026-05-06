@@ -26,15 +26,34 @@ func (r *UserRepository) GetByID(ctx context.Context, id string) (*domain.User, 
 	var u domain.User
 	var role string
 	err := r.db.Pool.QueryRow(ctx, `
-		SELECT id, email, name, role, created_at
+		SELECT id, COALESCE(clerk_id, '') AS clerk_id, email, name, role, created_at
 		FROM users
 		WHERE id = $1
-	`, id).Scan(&u.ID, &u.Email, &u.Name, &role, &u.CreatedAt)
+	`, id).Scan(&u.ID, &u.ClerkID, &u.Email, &u.Name, &role, &u.CreatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, domain.ErrNotFound
 		}
 		return nil, fmt.Errorf("get user by id: %w", err)
+	}
+	u.Role = domain.UserRole(role)
+	return &u, nil
+}
+
+// GetByClerkID retrieves a user by their Clerk ID.
+func (r *UserRepository) GetByClerkID(ctx context.Context, clerkID string) (*domain.User, error) {
+	var u domain.User
+	var role string
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT id, clerk_id, email, name, role, created_at
+		FROM users
+		WHERE clerk_id = $1
+	`, clerkID).Scan(&u.ID, &u.ClerkID, &u.Email, &u.Name, &role, &u.CreatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.ErrNotFound
+		}
+		return nil, fmt.Errorf("get user by clerk_id: %w", err)
 	}
 	u.Role = domain.UserRole(role)
 	return &u, nil
@@ -51,6 +70,36 @@ func (r *UserRepository) Create(ctx context.Context, email, name string, passwor
 		return nil, fmt.Errorf("create user: %w", err)
 	}
 	return &u, nil
+}
+
+// CreateFromClerk creates a new user from Clerk webhook data.
+func (r *UserRepository) CreateFromClerk(ctx context.Context, clerkID, email, name string, role domain.UserRole) (*domain.User, error) {
+	var u domain.User
+	var rl string
+	err := r.db.Pool.QueryRow(ctx, `
+		INSERT INTO users (clerk_id, email, name, role)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, clerk_id, email, name, role, created_at
+	`, clerkID, email, name, string(role)).Scan(&u.ID, &u.ClerkID, &u.Email, &u.Name, &rl, &u.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("create user from clerk: %w", err)
+	}
+	u.Role = domain.UserRole(rl)
+	return &u, nil
+}
+
+// UpdateFromClerk updates an existing user from Clerk webhook data.
+func (r *UserRepository) UpdateFromClerk(ctx context.Context, id, email, name string, role domain.UserRole) error {
+	cmd, err := r.db.Pool.Exec(ctx, `
+		UPDATE users SET email=$2, name=$3, role=$4 WHERE id=$1
+	`, id, email, name, string(role))
+	if err != nil {
+		return fmt.Errorf("update user from clerk: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
 }
 
 func (r *UserRepository) GetByEmailWithHash(ctx context.Context, email string) (*userRow, error) {
@@ -73,7 +122,7 @@ func (r *UserRepository) GetByEmailWithHash(ctx context.Context, email string) (
 
 func (r *UserRepository) List(ctx context.Context) ([]*domain.User, error) {
 	rows, err := r.db.Pool.Query(ctx, `
-		SELECT id, email, name, role, created_at
+		SELECT id, COALESCE(clerk_id, '') AS clerk_id, email, name, role, created_at
 		FROM users
 		ORDER BY created_at DESC
 	`)
@@ -86,7 +135,7 @@ func (r *UserRepository) List(ctx context.Context) ([]*domain.User, error) {
 	for rows.Next() {
 		var u domain.User
 		var role string
-		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &role, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.ClerkID, &u.Email, &u.Name, &role, &u.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		u.Role = domain.UserRole(role)

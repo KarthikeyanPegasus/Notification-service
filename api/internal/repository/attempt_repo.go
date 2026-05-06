@@ -22,12 +22,12 @@ func NewAttemptRepository(db *DB) *AttemptRepository {
 func (r *AttemptRepository) Create(ctx context.Context, a *domain.NotificationAttempt) error {
 	const q = `
 		INSERT INTO notification_attempts
-			(id, notification_id, attempt_number, status, provider, provider_msg_id,
+			(id, notification_id, attempt_number, retry_count, status, provider, provider_msg_id,
 			 error_code, error_message, latency_ms, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`
 
 	_, err := r.db.Pool.Exec(ctx, q,
-		a.ID, a.NotificationID, a.AttemptNumber, a.Status, a.Provider,
+		a.ID, a.NotificationID, a.AttemptNumber, a.RetryCount, a.Status, a.Provider,
 		a.ProviderMsgID, a.ErrorCode, a.ErrorMessage, a.LatencyMs, a.CreatedAt,
 	)
 	if err != nil {
@@ -39,7 +39,7 @@ func (r *AttemptRepository) Create(ctx context.Context, a *domain.NotificationAt
 // ListByNotificationID returns all attempts for a notification ordered by attempt number.
 func (r *AttemptRepository) ListByNotificationID(ctx context.Context, notifID uuid.UUID) ([]*domain.NotificationAttempt, error) {
 	const q = `
-		SELECT id, notification_id, attempt_number, status, provider, provider_msg_id,
+		SELECT id, notification_id, attempt_number, retry_count, status, provider, provider_msg_id,
 		       error_code, error_message, latency_ms, created_at
 		FROM notification_attempts
 		WHERE notification_id = $1
@@ -55,7 +55,7 @@ func (r *AttemptRepository) ListByNotificationID(ctx context.Context, notifID uu
 	for rows.Next() {
 		a := &domain.NotificationAttempt{}
 		if err := rows.Scan(
-			&a.ID, &a.NotificationID, &a.AttemptNumber, &a.Status, &a.Provider,
+			&a.ID, &a.NotificationID, &a.AttemptNumber, &a.RetryCount, &a.Status, &a.Provider,
 			&a.ProviderMsgID, &a.ErrorCode, &a.ErrorMessage, &a.LatencyMs, &a.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning attempt: %w", err)
@@ -68,7 +68,7 @@ func (r *AttemptRepository) ListByNotificationID(ctx context.Context, notifID uu
 // FindByProviderMsgID returns the most recent attempt with the given provider message ID.
 func (r *AttemptRepository) FindByProviderMsgID(ctx context.Context, providerMsgID string) (*domain.NotificationAttempt, error) {
 	const q = `
-		SELECT id, notification_id, attempt_number, status, provider, provider_msg_id,
+		SELECT id, notification_id, attempt_number, retry_count, status, provider, provider_msg_id,
 		       error_code, error_message, latency_ms, created_at
 		FROM notification_attempts
 		WHERE provider_msg_id = $1
@@ -76,7 +76,7 @@ func (r *AttemptRepository) FindByProviderMsgID(ctx context.Context, providerMsg
 		LIMIT 1`
 	a := &domain.NotificationAttempt{}
 	err := r.db.Pool.QueryRow(ctx, q, providerMsgID).Scan(
-		&a.ID, &a.NotificationID, &a.AttemptNumber, &a.Status, &a.Provider,
+		&a.ID, &a.NotificationID, &a.AttemptNumber, &a.RetryCount, &a.Status, &a.Provider,
 		&a.ProviderMsgID, &a.ErrorCode, &a.ErrorMessage, &a.LatencyMs, &a.CreatedAt,
 	)
 	if err != nil {
@@ -164,31 +164,67 @@ var vendorPricing = map[string]float64{
 }
 
 // GetVendorMetrics returns real-time metrics for each provider/vendor for a given duration.
-func (r *AttemptRepository) GetVendorMetrics(ctx context.Context, since time.Duration) ([]VendorMetricRow, error) {
+// When migratedSince is non-nil the success-rate and latency window is additionally filtered
+// to records created after that timestamp, letting the UI show post-migration performance
+// for a new vendor independently of its all-time reputation stats.
+func (r *AttemptRepository) GetVendorMetrics(ctx context.Context, since time.Duration, migratedSince *time.Time) ([]VendorMetricRow, error) {
+	return r.GetVendorMetricsWithScope(ctx, since, migratedSince, nil, nil)
+}
+
+// GetVendorMetricsWithScope returns vendor metrics optionally scoped to specific API keys.
+// When scope is specified, it adds a join to notifications to filter by api_key_id.
+func (r *AttemptRepository) GetVendorMetricsWithScope(ctx context.Context, since time.Duration, migratedSince *time.Time, apiKeyID *uuid.UUID, apiKeyIDs []uuid.UUID) ([]VendorMetricRow, error) {
 	threshold := time.Now().Add(-since)
-	// Provider universe = active vendor_configs (specific keys only) UNION providers
-	// that have recent attempt records. This ensures env-var-configured providers
-	// (no DB entry) still show up as long as they have sent at least one notification.
-	const q = `
+	// If a migration cutover timestamp is supplied and it is more recent than the
+	// rolling window start, tighten the window to that timestamp so the UI can
+	// show only post-migration sends for the new vendor.
+	if migratedSince != nil && migratedSince.After(threshold) {
+		threshold = *migratedSince
+	}
+
+	// Build scope filters and query arguments.
+	args := []any{threshold}
+	scopeFilter := ""
+	vendorScopeFilter := ""
+	if apiKeyID != nil {
+		args = append(args, *apiKeyID)
+		scopeFilter = "AND n.api_key_id = $2::uuid"
+		vendorScopeFilter = "AND (vc.api_key_id IS NULL OR vc.api_key_id = $2::uuid)"
+	} else if apiKeyIDs != nil {
+		// Non-nil: scoped. Empty slice → ANY({}) returns 0 rows. nil → no filter (admin).
+		args = append(args, apiKeyIDs)
+		scopeFilter = "AND n.api_key_id = ANY($2::uuid[])"
+		vendorScopeFilter = "AND (vc.api_key_id IS NULL OR vc.api_key_id = ANY($2::uuid[]))"
+	}
+
+	// Provider universe = active vendor configs in caller scope UNION providers
+	// observed in scoped attempts. This keeps metrics tenant-safe while still
+	// showing providers with no recent activity.
+	q := `
 		WITH providers AS (
-			SELECT DISTINCT vendor_type
-			FROM vendor_configs
-			WHERE is_active = true
-			  AND vendor_type NOT IN (
+			SELECT DISTINCT vc.vendor_type
+			FROM vendor_configs vc
+			WHERE vc.is_active = true
+			  AND vc.vendor_type NOT IN (
 			    'email', 'sms', 'push', 'webhook', 'webhooks',
 			    'email_routing', 'sms_routing', 'push_routing', 'webhook_routing',
-			    'workflow_orchestration'
+			    'workflow_orchestration', 'worker_pool', 'autoscaler'
 			  )
+			  ` + vendorScopeFilter + `
 			UNION
-			SELECT DISTINCT provider AS vendor_type
-			FROM notification_attempts
-			WHERE created_at >= $1
-			  AND provider IS NOT NULL AND provider <> ''
+			SELECT DISTINCT na.provider AS vendor_type
+			FROM notification_attempts na
+			JOIN notifications n ON n.id = na.notification_id
+			WHERE na.created_at >= $1
+			  AND na.provider IS NOT NULL AND na.provider <> ''
+			  ` + scopeFilter + `
 		),
 		windowed AS (
-			SELECT *
-			FROM notification_attempts
-			WHERE created_at >= $1
+			SELECT na.*
+			FROM notification_attempts na
+			JOIN notifications n ON n.id = na.notification_id
+			WHERE na.created_at >= $1
+			  ` + scopeFilter + `
 		),
 		latest AS (
 			SELECT DISTINCT ON (provider)
@@ -198,32 +234,31 @@ func (r *AttemptRepository) GetVendorMetrics(ctx context.Context, since time.Dur
 			FROM windowed
 			ORDER BY provider, created_at DESC
 		),
-		-- All-time send totals per provider — used as the denominator for
-		-- bounce/complaint rates so that vendors with 0 recent sends still
-		-- show a meaningful historical rate.
 		all_time_sends AS (
-			SELECT provider, COUNT(*) AS all_time_total
-			FROM notification_attempts
-			WHERE provider IS NOT NULL AND provider <> ''
-			GROUP BY provider
+			SELECT na.provider, COUNT(*) AS all_time_total
+			FROM notification_attempts na
+			JOIN notifications n ON n.id = na.notification_id
+			WHERE na.provider IS NOT NULL AND na.provider <> ''
+			  ` + scopeFilter + `
+			GROUP BY na.provider
 		),
-		-- All-time bounced notifications attributed to each provider (not
-		-- limited to the live window so the rate reflects historical reality).
 		bounces AS (
 			SELECT na.provider, COUNT(*) AS bounce_count
 			FROM notification_attempts na
 			JOIN notifications n ON n.id = na.notification_id
 			WHERE n.status = 'bounced'
 			  AND na.provider IS NOT NULL AND na.provider <> ''
+			  ` + scopeFilter + `
 			GROUP BY na.provider
 		),
-		-- All-time spam complaints attributed to each provider.
 		complaints AS (
-			SELECT (metadata->>'provider') AS provider, COUNT(*) AS complaint_count
-			FROM notification_events
-			WHERE event_type = 'complained'
-			  AND metadata ? 'provider'
-			GROUP BY metadata->>'provider'
+			SELECT (ne.metadata->>'provider') AS provider, COUNT(*) AS complaint_count
+			FROM notification_events ne
+			JOIN notifications n ON n.id = ne.notification_id
+			WHERE ne.event_type = 'complained'
+			  AND ne.metadata ? 'provider'
+			  ` + scopeFilter + `
+			GROUP BY ne.metadata->>'provider'
 		)
 		SELECT
 			p.vendor_type AS provider,
@@ -237,16 +272,16 @@ func (r *AttemptRepository) GetVendorMetrics(ctx context.Context, since time.Dur
 			COALESCE(c.complaint_count, 0)                 AS complaint_count,
 			COALESCE(ats.all_time_total, 0)                AS all_time_total
 		FROM providers p
-		LEFT JOIN windowed     w   ON w.provider   = p.vendor_type
-		LEFT JOIN latest       l   ON l.provider   = p.vendor_type
+		LEFT JOIN windowed       w   ON w.provider   = p.vendor_type
+		LEFT JOIN latest         l   ON l.provider   = p.vendor_type
 		LEFT JOIN all_time_sends ats ON ats.provider = p.vendor_type
-		LEFT JOIN bounces      b   ON b.provider   = p.vendor_type
-		LEFT JOIN complaints   c   ON c.provider   = p.vendor_type
+		LEFT JOIN bounces        b   ON b.provider   = p.vendor_type
+		LEFT JOIN complaints     c   ON c.provider   = p.vendor_type
 		GROUP BY p.vendor_type, l.last_status, l.last_error_message,
 		         b.bounce_count, c.complaint_count, ats.all_time_total
 		ORDER BY p.vendor_type ASC`
 
-	rows, err := r.db.Pool.Query(ctx, q, threshold)
+	rows, err := r.db.Pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying vendor metrics: %w", err)
 	}
@@ -287,14 +322,36 @@ func (r *AttemptRepository) GetVendorMetrics(ctx context.Context, since time.Dur
 // GetVendorSendTotals returns all-time successful send counts per provider from our attempt records.
 // Used by the billing service to compute estimated cost for providers without a billing API.
 func (r *AttemptRepository) GetVendorSendTotals(ctx context.Context) (map[string]int64, error) {
-	const q = `
-		SELECT provider, COUNT(*) AS total
-		FROM notification_attempts
-		WHERE provider IS NOT NULL AND provider <> ''
-		  AND status IN ('sent', 'delivered')
-		GROUP BY provider`
+	return r.GetVendorSendTotalsWithScope(ctx, nil, nil)
+}
 
-	rows, err := r.db.Pool.Query(ctx, q)
+// GetVendorSendTotalsWithScope returns all-time successful send counts per provider,
+// optionally constrained to a single API key or an assigned API key set.
+func (r *AttemptRepository) GetVendorSendTotalsWithScope(ctx context.Context, apiKeyID *uuid.UUID, apiKeyIDs []uuid.UUID) (map[string]int64, error) {
+	args := []any{}
+	where := `WHERE na.provider IS NOT NULL AND na.provider <> ''
+	  AND na.status IN ('sent', 'delivered')`
+	idx := 1
+
+	if apiKeyID != nil {
+		where += fmt.Sprintf(" AND n.api_key_id = $%d::uuid", idx)
+		args = append(args, *apiKeyID)
+		idx++
+	} else if apiKeyIDs != nil {
+		// Non-nil: scoped. Empty slice → ANY({}) returns 0 rows. nil → no filter (admin).
+		where += fmt.Sprintf(" AND n.api_key_id = ANY($%d::uuid[])", idx)
+		args = append(args, apiKeyIDs)
+		idx++
+	}
+
+	q := `
+		SELECT na.provider, COUNT(*) AS total
+		FROM notification_attempts na
+		JOIN notifications n ON n.id = na.notification_id
+		` + where + `
+		GROUP BY na.provider`
+
+	rows, err := r.db.Pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying vendor send totals: %w", err)
 	}

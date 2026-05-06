@@ -13,6 +13,7 @@ const (
 
 type User struct {
 	ID        string    `json:"id" db:"id"`
+	ClerkID   string    `json:"clerk_id" db:"clerk_id"`
 	Email     string    `json:"email" db:"email"`
 	Name      string    `json:"name" db:"name"`
 	Role      UserRole  `json:"role" db:"role"`

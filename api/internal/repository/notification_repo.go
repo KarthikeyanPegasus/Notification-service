@@ -148,7 +148,9 @@ func (r *NotificationRepository) List(ctx context.Context, f ListFilters) ([]*do
 		args = append(args, *f.APIKeyID)
 		idx++
 	}
-	if f.APIKeyID == nil && len(f.APIKeyIDs) > 0 {
+	if f.APIKeyID == nil && f.APIKeyIDs != nil {
+		// Non-nil slice: scoped. Empty → ANY({}) matches nothing (returns 0 rows).
+		// nil means admin/no-filter.
 		where += fmt.Sprintf(" AND n.api_key_id = ANY($%d::uuid[])", idx)
 		args = append(args, f.APIKeyIDs)
 		idx++
@@ -263,11 +265,19 @@ func scanNotificationRow(rows pgx.Rows) (*domain.Notification, error) {
 func (r *NotificationRepository) GetStuckNotifications(ctx context.Context, olderThan time.Duration, limit int) ([]*domain.Notification, error) {
 	threshold := time.Now().Add(-olderThan)
 	const q = `
-		SELECT id, idempotency_key, user_id, channel, priority, type, template_id,
-		       rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, source, created_at, updated_at
-		FROM notifications 
-		WHERE status IN ($1, $2) AND updated_at < $3
-		ORDER BY updated_at ASC
+		SELECT n.id, n.idempotency_key, n.user_id, n.channel, n.priority, n.type, n.template_id,
+		       n.rendered_content, n.recipient, n.status, n.scheduled_at, n.sent_at, n.delivered_at,
+		       n.api_key_id, n.source, n.created_at, n.updated_at,
+		       COALESCE(k.name, '') as client_name,
+		       COALESCE(
+		           (SELECT provider FROM notification_attempts WHERE notification_id = n.id ORDER BY created_at DESC LIMIT 1),
+		           (SELECT (metadata->>'provider') FROM notification_events WHERE notification_id = n.id AND metadata ? 'provider' ORDER BY created_at DESC LIMIT 1),
+		           ''
+		       ) as provider
+		FROM notifications n
+		LEFT JOIN api_keys k ON n.api_key_id = k.id
+		WHERE n.status IN ($1, $2) AND n.updated_at < $3
+		ORDER BY n.updated_at ASC
 		LIMIT $4`
 
 	rows, err := r.db.Pool.Query(ctx, q, domain.StatusPending, domain.StatusSent, threshold, limit)
@@ -405,13 +415,13 @@ func (r *NotificationRepository) GetIngressBreakdown(ctx context.Context, from, 
 }
 
 // GetIngressBreakdownForKeys calculates ingestion counts per source for a time range for multiple api keys.
-// If apiKeyIDs is empty, it returns results across all keys.
+// If apiKeyIDs is nil, it returns results across all keys (admin). If empty, returns nothing.
 func (r *NotificationRepository) GetIngressBreakdownForKeys(ctx context.Context, from, to time.Time, apiKeyIDs []uuid.UUID) ([]IngressBreakdownRow, error) {
 	const q = `
 		SELECT source, COUNT(*)
 		FROM notifications
 		WHERE created_at >= $1 AND created_at <= $2
-		  AND (COALESCE(array_length($3::uuid[], 1), 0) = 0 OR api_key_id = ANY($3::uuid[]))
+		  AND ($3::uuid[] IS NULL OR api_key_id = ANY($3::uuid[]))
 		GROUP BY source
 		ORDER BY count DESC`
 
@@ -437,6 +447,12 @@ func (r *NotificationRepository) GetIngressBreakdownForKeys(ctx context.Context,
 
 // GetSMSCountryBreakdown calculates SMS counts per country prefix for a time range.
 func (r *NotificationRepository) GetSMSCountryBreakdown(ctx context.Context, from, to time.Time, apiKeyID *uuid.UUID) ([]BreakdownRow, error) {
+	return r.GetSMSCountryBreakdownWithKeys(ctx, from, to, apiKeyID, nil)
+}
+
+// GetSMSCountryBreakdownWithKeys calculates SMS counts per country prefix for a time range,
+// supporting both single and multi-key scope enforcement.
+func (r *NotificationRepository) GetSMSCountryBreakdownWithKeys(ctx context.Context, from, to time.Time, apiKeyID *uuid.UUID, apiKeyIDs []uuid.UUID) ([]BreakdownRow, error) {
 	const q = `
 		SELECT 
 			CASE 
@@ -451,12 +467,24 @@ func (r *NotificationRepository) GetSMSCountryBreakdown(ctx context.Context, fro
 			COUNT(*) as count
 		FROM notifications
 		WHERE channel = 'sms' AND created_at >= $1 AND created_at <= $2
-		  AND ($3::uuid IS NULL OR api_key_id = $3::uuid)
+		  AND (
+		    ($3::uuid IS NULL AND $4::uuid[] IS NULL)
+		    OR ($3::uuid IS NOT NULL AND api_key_id = $3::uuid)
+		    OR ($4::uuid[] IS NOT NULL AND api_key_id = ANY($4::uuid[]))
+		  )
 		GROUP BY country_prefix
 		ORDER BY count DESC
 		LIMIT 10`
 
-	rows, err := r.db.Pool.Query(ctx, q, from, to, apiKeyID)
+	var args []any
+	args = append(args, from, to)
+	if apiKeyID != nil {
+		args = append(args, *apiKeyID, nil)
+	} else {
+		args = append(args, nil, apiKeyIDs)
+	}
+
+	rows, err := r.db.Pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying sms country breakdown: %w", err)
 	}
@@ -475,16 +503,34 @@ func (r *NotificationRepository) GetSMSCountryBreakdown(ctx context.Context, fro
 
 // GetEmailDomainBreakdown calculates Email counts per domain for a time range.
 func (r *NotificationRepository) GetEmailDomainBreakdown(ctx context.Context, from, to time.Time, apiKeyID *uuid.UUID) ([]BreakdownRow, error) {
+	return r.GetEmailDomainBreakdownWithKeys(ctx, from, to, apiKeyID, nil)
+}
+
+// GetEmailDomainBreakdownWithKeys calculates Email counts per domain for a time range,
+// supporting both single and multi-key scope enforcement.
+func (r *NotificationRepository) GetEmailDomainBreakdownWithKeys(ctx context.Context, from, to time.Time, apiKeyID *uuid.UUID, apiKeyIDs []uuid.UUID) ([]BreakdownRow, error) {
 	const q = `
 		SELECT split_part(recipient, '@', 2) as domain, COUNT(*) as count
 		FROM notifications
 		WHERE channel = 'email' AND created_at >= $1 AND created_at <= $2
-		  AND ($3::uuid IS NULL OR api_key_id = $3::uuid)
+		  AND (
+		    ($3::uuid IS NULL AND $4::uuid[] IS NULL)
+		    OR ($3::uuid IS NOT NULL AND api_key_id = $3::uuid)
+		    OR ($4::uuid[] IS NOT NULL AND api_key_id = ANY($4::uuid[]))
+		  )
 		GROUP BY domain
 		ORDER BY count DESC
 		LIMIT 10`
 
-	rows, err := r.db.Pool.Query(ctx, q, from, to, apiKeyID)
+	var args []any
+	args = append(args, from, to)
+	if apiKeyID != nil {
+		args = append(args, *apiKeyID, nil)
+	} else {
+		args = append(args, nil, apiKeyIDs)
+	}
+
+	rows, err := r.db.Pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying email domain breakdown: %w", err)
 	}
@@ -574,14 +620,20 @@ type AdminMTTDRow struct {
 func (r *NotificationRepository) GetMTTDByPriority(ctx context.Context, since time.Time) ([]AdminMTTDRow, error) {
 	const q = `
 		SELECT
-			n.priority                                                             AS grp,
-			COALESCE(AVG(a.latency_ms), 0)                                        AS avg_ms,
-			COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY a.latency_ms), 0) AS p95_ms,
-			COUNT(*)                                                              AS cnt
-		FROM notification_attempts a
-		JOIN notifications n ON n.id = a.notification_id
-		WHERE a.created_at >= $1
-		  AND a.latency_ms > 0
+			n.priority AS grp,
+			COALESCE(AVG(EXTRACT(EPOCH FROM (COALESCE(n.delivered_at, n.sent_at) - n.created_at)) * 1000), 0) AS avg_ms,
+			COALESCE(
+				PERCENTILE_CONT(0.95) WITHIN GROUP (
+					ORDER BY (EXTRACT(EPOCH FROM (COALESCE(n.delivered_at, n.sent_at) - n.created_at)) * 1000)
+				),
+				0
+			) AS p95_ms,
+			COUNT(*) AS cnt
+		FROM notifications n
+		WHERE n.created_at >= $1
+		  AND n.status IN ('sent', 'delivered')
+		  AND (n.delivered_at IS NOT NULL OR n.sent_at IS NOT NULL)
+		  AND COALESCE(n.delivered_at, n.sent_at) >= n.created_at
 		GROUP BY n.priority
 		ORDER BY
 			CASE n.priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END`
@@ -593,18 +645,78 @@ func (r *NotificationRepository) GetMTTDByPriority(ctx context.Context, since ti
 func (r *NotificationRepository) GetMTTDByVendor(ctx context.Context, since time.Time) ([]AdminMTTDRow, error) {
 	const q = `
 		SELECT
-			COALESCE(a.provider, 'unknown')                                        AS grp,
-			COALESCE(AVG(a.latency_ms), 0)                                        AS avg_ms,
-			COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY a.latency_ms), 0) AS p95_ms,
-			COUNT(*)                                                              AS cnt
-		FROM notification_attempts a
-		WHERE a.created_at >= $1
-		  AND a.latency_ms > 0
-		GROUP BY a.provider
+			COALESCE(la.provider, 'unknown') AS grp,
+			COALESCE(AVG(EXTRACT(EPOCH FROM (COALESCE(n.delivered_at, n.sent_at) - n.created_at)) * 1000), 0) AS avg_ms,
+			COALESCE(
+				PERCENTILE_CONT(0.95) WITHIN GROUP (
+					ORDER BY (EXTRACT(EPOCH FROM (COALESCE(n.delivered_at, n.sent_at) - n.created_at)) * 1000)
+				),
+				0
+			) AS p95_ms,
+			COUNT(*) AS cnt
+		FROM notifications n
+		LEFT JOIN LATERAL (
+			SELECT a.provider
+			FROM notification_attempts a
+			WHERE a.notification_id = n.id
+			ORDER BY a.created_at DESC
+			LIMIT 1
+		) la ON TRUE
+		WHERE n.created_at >= $1
+		  AND n.status IN ('sent', 'delivered')
+		  AND (n.delivered_at IS NOT NULL OR n.sent_at IS NOT NULL)
+		  AND COALESCE(n.delivered_at, n.sent_at) >= n.created_at
+		GROUP BY la.provider
 		ORDER BY avg_ms DESC
 		LIMIT 20`
 
 	return r.queryMTTD(ctx, q, since)
+}
+
+// MTTDClientRow holds MTTD grouped by clientID + priority.
+// Used by the AutoScaler to make per-client scaling decisions.
+type MTTDClientRow struct {
+	ClientID string  `json:"client_id"`
+	Priority string  `json:"priority"`
+	AvgMs    float64 `json:"avg_ms"`
+	Count    int64   `json:"count"`
+}
+
+// GetMTTDByClientAndPriority returns MTTD grouped by clientID + priority
+// for the given lookback window. Used by the AutoScaler.
+func (r *NotificationRepository) GetMTTDByClientAndPriority(ctx context.Context, since time.Time) ([]MTTDClientRow, error) {
+	const q = `
+		SELECT
+			COALESCE(n.api_key_id::text, 'global') AS client_id,
+			n.priority,
+			COALESCE(AVG(EXTRACT(EPOCH FROM (COALESCE(n.delivered_at, n.sent_at) - n.created_at)) * 1000), 0) AS avg_ms,
+			COUNT(*) AS cnt
+		FROM notifications n
+		WHERE n.created_at >= $1
+		  AND n.status IN ('sent', 'delivered')
+		  AND (n.delivered_at IS NOT NULL OR n.sent_at IS NOT NULL)
+		  AND COALESCE(n.delivered_at, n.sent_at) >= n.created_at
+		GROUP BY n.api_key_id, n.priority
+		ORDER BY n.priority, n.api_key_id`
+
+	rows, err := r.db.Pool.Query(ctx, q, since)
+	if err != nil {
+		return nil, fmt.Errorf("querying mttd by client: %w", err)
+	}
+	defer rows.Close()
+
+	var result []MTTDClientRow
+	for rows.Next() {
+		var row MTTDClientRow
+		if err := rows.Scan(&row.ClientID, &row.Priority, &row.AvgMs, &row.Count); err != nil {
+			return nil, fmt.Errorf("scanning mttd client row: %w", err)
+		}
+		result = append(result, row)
+	}
+	if result == nil {
+		result = []MTTDClientRow{}
+	}
+	return result, rows.Err()
 }
 
 func (r *NotificationRepository) queryMTTD(ctx context.Context, q string, since time.Time) ([]AdminMTTDRow, error) {
@@ -658,6 +770,12 @@ func (r *NotificationRepository) GetDeliveryStats(ctx context.Context, since tim
 }
 
 func (r *NotificationRepository) GetScheduledStats(ctx context.Context, from, to time.Time, apiKeyID *uuid.UUID) (ScheduledStatsRow, error) {
+	return r.GetScheduledStatsWithKeys(ctx, from, to, apiKeyID, nil)
+}
+
+// GetScheduledStatsWithKeys returns aggregate stats for scheduled notifications in the given time range,
+// supporting both single and multi-key scope enforcement.
+func (r *NotificationRepository) GetScheduledStatsWithKeys(ctx context.Context, from, to time.Time, apiKeyID *uuid.UUID, apiKeyIDs []uuid.UUID) (ScheduledStatsRow, error) {
 	const q = `
 		SELECT
 			COUNT(*) FILTER (WHERE scheduled_at IS NOT NULL)                                   AS total_scheduled,
@@ -672,10 +790,22 @@ func (r *NotificationRepository) GetScheduledStats(ctx context.Context, from, to
 			) AS avg_delivery_latency_ms
 		FROM notifications
 		WHERE created_at >= $1 AND created_at <= $2
-		  AND ($3::uuid IS NULL OR api_key_id = $3::uuid)`
+		  AND (
+		    ($3::uuid IS NULL AND $4::uuid[] IS NULL)
+		    OR ($3::uuid IS NOT NULL AND api_key_id = $3::uuid)
+		    OR ($4::uuid[] IS NOT NULL AND api_key_id = ANY($4::uuid[]))
+		  )`
+
+	var args []any
+	args = append(args, from, to)
+	if apiKeyID != nil {
+		args = append(args, *apiKeyID, nil)
+	} else {
+		args = append(args, nil, apiKeyIDs)
+	}
 
 	var row ScheduledStatsRow
-	err := r.db.Pool.QueryRow(ctx, q, from, to, apiKeyID).Scan(
+	err := r.db.Pool.QueryRow(ctx, q, args...).Scan(
 		&row.TotalScheduled, &row.Pending, &row.Delivered, &row.AvgDeliveryLatencyMs,
 	)
 	if err != nil {
@@ -831,4 +961,13 @@ func (r *NotificationRepository) GetScheduleToStartLatency(ctx context.Context, 
 		result = []CadenceScheduleRow{}
 	}
 	return result, rows.Err()
+}
+
+// CountClientNotificationsSince counts notifications for a client created since a given time.
+// Used by the migration manager to estimate in-flight workflows on the old orchestration.
+func (r *NotificationRepository) CountClientNotificationsSince(ctx context.Context, apiKeyID uuid.UUID, since time.Time) (int, error) {
+	const q = `SELECT COUNT(*) FROM notifications WHERE api_key_id=$1 AND created_at>=$2`
+	var count int
+	err := r.db.Pool.QueryRow(ctx, q, apiKeyID, since).Scan(&count)
+	return count, err
 }

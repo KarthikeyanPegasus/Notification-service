@@ -12,7 +12,10 @@ import (
 	"go.uber.org/zap"
 )
 
-const workflowOrchestrationVendorType = "workflow_orchestration"
+const (
+	workflowOrchestrationVendorType = "workflow_orchestration"
+	autoscalerConfigVendorType      = "autoscaler"
+)
 
 type workflowOrchestrationConfig struct {
 	Provider string `json:"provider"`
@@ -63,7 +66,17 @@ func normalizeHostPort(raw string) string {
 	return strings.TrimSpace(s)
 }
 
+func normalizeMode(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
 func (p *WorkflowClientProvider) ClientForScope(ctx context.Context, apiKeyID *string) (workflow.WorkflowEngine, error) {
+	// Standalone mode: the API never starts workflows directly.
+	// All notifications are published to Kafka for the Worker to pick up.
+	if normalizeMode(p.cfg.Cadence.Mode) == "standalone" {
+		return nil, nil
+	}
+
 	// No scope => use the bootstrapped default engine.
 	if apiKeyID == nil || *apiKeyID == "" {
 		return p.defaultEngine, nil
@@ -91,7 +104,7 @@ func (p *WorkflowClientProvider) ClientForScope(ctx context.Context, apiKeyID *s
 		return p.defaultEngine, nil
 	}
 
-	provider := cfg.Provider
+	provider := normalizeMode(cfg.Provider)
 	hostPort := ""
 	namespace := ""
 	switch provider {
@@ -113,6 +126,53 @@ func (p *WorkflowClientProvider) ClientForScope(ctx context.Context, apiKeyID *s
 
 	// If override matches default, reuse default.
 	if p.defaultEngine != nil && hostPort == normalizeHostPort(p.cfg.Cadence.HostPort) && namespace == p.cfg.Cadence.Domain {
+		return p.defaultEngine, nil
+	}
+
+	key := provider + "|" + hostPort + "|" + namespace
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c, ok := p.cache[key]; ok {
+		return c, nil
+	}
+
+	var engine workflow.WorkflowEngine
+	if provider == "cadence" {
+		engine, _ = workflow.NewCadenceEngineWith(hostPort, namespace, p.log)
+	} else {
+		engine, _ = workflow.NewTemporalEngineWith(hostPort, namespace, p.log)
+	}
+
+	p.cache[key] = engine
+	return engine, nil
+}
+
+func (p *WorkflowClientProvider) EngineFromConfig(ctx context.Context, configJSON json.RawMessage) (workflow.WorkflowEngine, error) {
+	if len(configJSON) == 0 {
+		return p.defaultEngine, nil
+	}
+
+	var cfg workflowOrchestrationConfig
+	if err := json.Unmarshal(configJSON, &cfg); err != nil {
+		return nil, err
+	}
+
+	provider := normalizeMode(cfg.Provider)
+	hostPort := ""
+	namespace := ""
+	switch provider {
+	case "cadence":
+		hostPort = normalizeHostPort(cfg.Cadence.HostPort)
+		namespace = cfg.Cadence.Domain
+	case "standalone":
+		return nil, nil
+	default:
+		provider = "temporal"
+		hostPort = normalizeHostPort(cfg.Temporal.HostPort)
+		namespace = cfg.Temporal.Namespace
+	}
+
+	if hostPort == "" || namespace == "" {
 		return p.defaultEngine, nil
 	}
 

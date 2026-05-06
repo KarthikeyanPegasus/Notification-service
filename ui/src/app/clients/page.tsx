@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { KeyRound, Plus, Copy, Trash2, Loader2, Settings } from 'lucide-react'
+import { KeyRound, Plus, Copy, Trash2, Loader2, Settings, FlaskConical } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -25,11 +25,17 @@ import {
 import {
   type ApiClientKey,
   createApiKey,
+  createMyClient,
   listApiKeys,
+  listMyClients,
   revokeApiKey,
 } from '@/lib/api'
+import { useUserRole } from '@/hooks/use-user-role'
 
 export default function ClientsPage() {
+  const role = useUserRole()
+  const isSandbox = role === 'dev'
+
   const [keys, setKeys] = useState<ApiClientKey[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -41,13 +47,15 @@ export default function ClientsPage() {
   const [copied, setCopied] = useState(false)
   const [revokingId, setRevokingId] = useState<string | null>(null)
 
-  const needsBearer = typeof process.env.NEXT_PUBLIC_API_BEARER === 'undefined' || !process.env.NEXT_PUBLIC_API_BEARER
+  const needsBearer = !isSandbox && (typeof process.env.NEXT_PUBLIC_API_BEARER === 'undefined' || !process.env.NEXT_PUBLIC_API_BEARER)
+
+  const activeCount = keys.filter((k) => !k.revoked_at).length
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const data = await listApiKeys()
+      const data = isSandbox ? await listMyClients() : await listApiKeys()
       setKeys(data ?? [])
     } catch (e) {
       console.error(e)
@@ -59,7 +67,7 @@ export default function ClientsPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [isSandbox])
 
   useEffect(() => {
     load()
@@ -71,7 +79,7 @@ export default function ClientsPage() {
     setCreating(true)
     setError(null)
     try {
-      const out = await createApiKey(name)
+      const out = isSandbox ? await createMyClient(name) : await createApiKey(name)
       setNewSecret(out.api_key)
       setSecretOpen(true)
       setCreateOpen(false)
@@ -118,12 +126,15 @@ export default function ClientsPage() {
           <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
             <KeyRound className="h-8 w-8 text-primary" aria-hidden />
             Client management
+            {isSandbox && <Badge variant="secondary" className="ml-1 text-xs font-normal gap-1"><FlaskConical className="h-3 w-3" />Sandbox</Badge>}
           </h1>
           <p className="text-muted-foreground mt-1 max-w-2xl">
-            Create and revoke API keys for server-to-server access (for example{' '}
-            <code className="text-xs rounded bg-muted px-1 py-0.5">X-API-Key</code> on{' '}
-            <code className="text-xs rounded bg-muted px-1 py-0.5">POST /v1/notifications</code>
-            ). The secret is shown only once when a key is created.
+            {isSandbox
+              ? 'Your isolated sandbox client. Create 1 API key to test integrations — it will not affect production.'
+              : <>Create and revoke API keys for server-to-server access (for example{' '}
+                  <code className="text-xs rounded bg-muted px-1 py-0.5">X-API-Key</code> on{' '}
+                  <code className="text-xs rounded bg-muted px-1 py-0.5">POST /v1/notifications</code>
+                  ). The secret is shown only once when a key is created.</>}
           </p>
         </div>
         <Button
@@ -131,12 +142,20 @@ export default function ClientsPage() {
             setCreateOpen(true)
             setCreateName('')
           }}
+          disabled={isSandbox && activeCount >= 1}
+          title={isSandbox && activeCount >= 1 ? 'Sandbox accounts are limited to 1 active client' : undefined}
           className="w-full md:w-auto shadow-lg shadow-primary/20"
         >
           <Plus className="mr-2 h-4 w-4" />
           New API key
         </Button>
       </div>
+
+      {isSandbox && (
+        <p className="text-sm text-blue-700 dark:text-blue-400 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3">
+          <strong>Sandbox mode</strong> — your client is isolated from production. Sandbox accounts are limited to 1 active API key.
+        </p>
+      )}
 
       {needsBearer && (
         <p className="text-sm text-amber-600 dark:text-amber-500 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
@@ -205,7 +224,7 @@ export default function ClientsPage() {
                             <Settings className="h-4 w-4" />
                           </Link>
                         </Button>
-                        {!revoked && (
+                        {!revoked && !isSandbox && (
                           <Button
                             variant="ghost"
                             size="icon"

@@ -2,11 +2,13 @@ package handler
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	clerkuser "github.com/clerk/clerk-sdk-go/v2/user"
 	"github.com/spidey/notification-service/internal/domain"
 	"github.com/spidey/notification-service/internal/repository"
 	"golang.org/x/crypto/bcrypt"
@@ -46,6 +48,28 @@ func (h *UserAdminHandler) Create(c *gin.Context) {
 		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role")
 		return
 	}
+
+	callerRole, _ := getRoleAndSubject(c)
+	if callerRole == string(domain.UserRoleDev) {
+		if role == domain.UserRoleAdmin || role == domain.UserRoleManager {
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "dev accounts can only invite dev or support users")
+			return
+		}
+		existing, err := h.users.List(c.Request.Context())
+		if err == nil {
+			nonAdmin := 0
+			for _, u := range existing {
+				if u.Role != domain.UserRoleAdmin {
+					nonAdmin++
+				}
+			}
+			if nonAdmin >= 2 {
+				respondError(c, http.StatusForbidden, "FORBIDDEN", "sandbox accounts are limited to 1 invited user")
+				return
+			}
+		}
+	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to hash password")
@@ -80,6 +104,13 @@ func (h *UserAdminHandler) SetRole(c *gin.Context) {
 	if err := h.users.SetRole(c.Request.Context(), id, role); err != nil {
 		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to set role")
 		return
+	}
+	if u, err := h.users.GetByID(c.Request.Context(), id); err == nil && u.ClerkID != "" {
+		meta, _ := json.Marshal(map[string]string{"role": string(role)})
+		raw := json.RawMessage(meta)
+		_, _ = clerkuser.UpdateMetadata(c.Request.Context(), u.ClerkID, &clerkuser.UpdateMetadataParams{
+			PublicMetadata: &raw,
+		})
 	}
 	c.Status(http.StatusNoContent)
 }

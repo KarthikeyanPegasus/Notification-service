@@ -2,9 +2,10 @@ package workflow
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
-	"log"
+	"math/big"
 	"strings"
 	"time"
 
@@ -15,6 +16,9 @@ import (
 	"github.com/spidey/notification-service/internal/pubsub"
 	"github.com/spidey/notification-service/internal/ratelimit"
 	"github.com/spidey/notification-service/internal/repository"
+	"github.com/spidey/notification-service/internal/security"
+	"go.temporal.io/sdk/activity"
+	"go.uber.org/zap"
 )
 
 type TemplateRenderer interface {
@@ -33,6 +37,7 @@ type Activities struct {
 	schedRepo        *repository.ScheduledRepository
 	eventRepo        *repository.EventRepository
 	attemptRepo      *repository.AttemptRepository
+	prefsRepo        *repository.UserPreferencesRepository
 	templateRenderer TemplateRenderer
 	deliverySvc      DeliveryProvider
 	pubsub           pubsub.Publisher
@@ -41,6 +46,8 @@ type Activities struct {
 	vendorRepo       config.Repository
 	rateLimitRepo    repository.VendorRateLimitRepository
 	rateLimiter      *ratelimit.VendorLimiter
+	contentFilter    security.ContentFilter
+	log              *zap.Logger
 }
 
 func NewActivities(
@@ -50,6 +57,7 @@ func NewActivities(
 	schedRepo *repository.ScheduledRepository,
 	eventRepo *repository.EventRepository,
 	attemptRepo *repository.AttemptRepository,
+	prefsRepo *repository.UserPreferencesRepository,
 	templateRenderer TemplateRenderer,
 	deliverySvc DeliveryProvider,
 	pubsub pubsub.Publisher,
@@ -58,6 +66,8 @@ func NewActivities(
 	vendorRepo config.Repository,
 	rateLimitRepo repository.VendorRateLimitRepository,
 	rateLimiter *ratelimit.VendorLimiter,
+	contentFilter security.ContentFilter,
+	log *zap.Logger,
 ) *Activities {
 	return &Activities{
 		cacheClient:      cacheClient,
@@ -66,6 +76,7 @@ func NewActivities(
 		schedRepo:        schedRepo,
 		eventRepo:        eventRepo,
 		attemptRepo:      attemptRepo,
+		prefsRepo:        prefsRepo,
 		templateRenderer: templateRenderer,
 		deliverySvc:      deliverySvc,
 		pubsub:           pubsub,
@@ -74,20 +85,22 @@ func NewActivities(
 		vendorRepo:       vendorRepo,
 		rateLimitRepo:    rateLimitRepo,
 		rateLimiter:      rateLimiter,
+		contentFilter:    contentFilter,
+		log:              log,
 	}
 }
 
 // RenderedNotification represents the final message payload.
 type RenderedNotification struct {
-	ID        uuid.UUID
-	Channel   domain.Channel
-	Recipient string
-	Payload   []byte // plain text body
+	ID           uuid.UUID
+	Channel      domain.Channel
+	Recipient    string
+	Payload      []byte // plain text body
 	Subject      string
 	HTML         string
 	ForcedVendor string
-	Priority  domain.Priority
-	ClientID  string
+	Priority     domain.Priority
+	ClientID     string
 }
 
 func (a *Activities) CheckPreferencesActivity(ctx context.Context, req *WorkflowRequest) (*domain.UserPreferences, error) {
@@ -96,11 +109,20 @@ func (a *Activities) CheckPreferencesActivity(ctx context.Context, req *Workflow
 	if dl, ok := ctx.Deadline(); ok {
 		deadline = dl.UTC().Format(time.RFC3339Nano)
 	}
-	log.Printf("[activity] CheckPreferencesActivity start notif_id=%s type=%q channel=%s recipient=%s deadline=%s",
-		req.ID.String(), req.Type, string(req.Channel), req.Recipient, deadline,
+	a.log.Info("CheckPreferencesActivity start",
+		zap.String("notif_id", req.ID.String()),
+		zap.String("type", req.Type),
+		zap.String("channel", string(req.Channel)),
+		zap.String("recipient", security.RedactRecipient(req.Recipient, req.Channel)),
+		zap.String("trace_id", req.TraceID),
+		zap.String("deadline", deadline),
 	)
 	defer func() {
-		log.Printf("[activity] CheckPreferencesActivity done notif_id=%s took=%s", req.ID.String(), time.Since(start))
+		a.log.Info("CheckPreferencesActivity done",
+			zap.String("notif_id", req.ID.String()),
+			zap.String("trace_id", req.TraceID),
+			zap.Duration("took", time.Since(start)),
+		)
 	}()
 
 	if req.Type == "test" {
@@ -115,15 +137,61 @@ func (a *Activities) CheckPreferencesActivity(ctx context.Context, req *Workflow
 		suppressed, err := a.govRepo.IsSuppressed(govCtx, stype, req.Recipient)
 		cancel()
 		if err != nil {
-			log.Printf("[activity] CheckPreferencesActivity suppression check error notif_id=%s err=%v", req.ID.String(), err)
+			a.log.Warn("CheckPreferencesActivity suppression check error",
+				zap.String("notif_id", req.ID.String()),
+				zap.String("trace_id", req.TraceID),
+				zap.Error(err),
+			)
+			// Fail-closed: if governance check errors, reject the notification
 			return nil, fmt.Errorf("checking suppression: %w", err)
 		}
 		if suppressed {
-			log.Printf("[activity] CheckPreferencesActivity recipient suppressed notif_id=%s channel=%s", req.ID.String(), req.Channel)
+			a.log.Info("CheckPreferencesActivity recipient suppressed",
+				zap.String("notif_id", req.ID.String()),
+				zap.String("channel", string(req.Channel)),
+			)
 			return &domain.UserPreferences{IsSuppressed: true}, nil
 		}
 	}
 
+	// DB-backed Preference Lookup: fetch actual user preferences from PostgreSQL
+	if a.prefsRepo != nil && req.UserID != "" {
+		prefCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		prefs, err := a.prefsRepo.Get(prefCtx, req.UserID)
+		cancel()
+		if err != nil {
+			a.log.Warn("CheckPreferencesActivity preferences lookup error, using permissive defaults",
+				zap.String("notif_id", req.ID.String()),
+				zap.String("user_id", req.UserID),
+				zap.String("trace_id", req.TraceID),
+				zap.Error(err),
+			)
+			// Fail-open for preference lookup errors (preferences outage shouldn't block all delivery)
+			return &domain.UserPreferences{
+				Channels:  map[domain.Channel]bool{req.Channel: true},
+				UpdatedAt: time.Now(),
+			}, nil
+		}
+		if prefs != nil {
+			a.log.Info("CheckPreferencesActivity loaded user preferences from DB",
+				zap.String("notif_id", req.ID.String()),
+				zap.String("user_id", req.UserID),
+				zap.Bool("channel_enabled", prefs.IsChannelEnabled(req.Channel)),
+				zap.Bool("suppressed", prefs.IsSuppressed),
+			)
+			// Check channel enablement
+			if !prefs.IsChannelEnabled(req.Channel) {
+				a.log.Info("CheckPreferencesActivity channel disabled by user",
+					zap.String("notif_id", req.ID.String()),
+					zap.String("channel", string(req.Channel)),
+				)
+				return &domain.UserPreferences{IsSuppressed: true}, nil
+			}
+			return prefs, nil
+		}
+	}
+
+	// Fallback: no preferences set for this user — return permissive defaults
 	return &domain.UserPreferences{
 		Channels:  map[domain.Channel]bool{req.Channel: true},
 		UpdatedAt: time.Now(),
@@ -203,6 +271,28 @@ func (a *Activities) RenderTemplateActivity(ctx context.Context, req *WorkflowRe
 	}, nil
 }
 
+func (a *Activities) ContentSecurityCheckActivity(ctx context.Context, rendered *RenderedNotification) error {
+	if a.contentFilter == nil {
+		return nil
+	}
+
+	content := &domain.RenderedContent{
+		Body:    string(rendered.Payload),
+		Subject: rendered.Subject,
+		HTML:    rendered.HTML,
+	}
+
+	if err := a.contentFilter.CheckContent(ctx, content); err != nil {
+		a.log.Warn("ContentSecurityCheckActivity flagged content",
+			zap.String("notif_id", rendered.ID.String()),
+			zap.Error(err),
+		)
+		return fmt.Errorf("content security check failed: %w", err)
+	}
+
+	return nil
+}
+
 func (a *Activities) PublishToPubSubActivity(ctx context.Context, rendered *RenderedNotification) (string, error) {
 	payload := map[string]string{
 		"body": string(rendered.Payload),
@@ -251,22 +341,19 @@ func (a *Activities) DeliverNotificationActivity(ctx context.Context, rendered *
 		cfgCopy := *a.cfg
 		_ = cfgCopy.LoadDynamicOverridesScoped(ctx, a.vendorRepo, &scope)
 		cfg = &cfgCopy
-		// Ensure n.APIKeyID is set on the object we pass to delivery
 		n.APIKeyID = dbNotif.APIKeyID
 	}
 
 	// 3. Enforce vendor rate limit before calling the provider.
-	// If throttled, return a retryable error so Temporal retries within the SLA window.
 	if a.rateLimiter != nil && a.rateLimitRepo != nil {
 		vendorName := n.ForcedVendor
 		if vendorName == "" {
-			vendorName = string(n.Channel) // fallback to channel name for rate limit key
+			vendorName = string(n.Channel)
 		}
 		clientIDStr := ""
 		if n.APIKeyID != nil {
 			clientIDStr = n.APIKeyID.String()
 		}
-		// Try scoped rate limit first; fall back to global
 		rl, _ := a.rateLimitRepo.Get(ctx, vendorName, &clientIDStr)
 		if rl == nil {
 			rl, _ = a.rateLimitRepo.Get(ctx, vendorName, nil)
@@ -274,7 +361,10 @@ func (a *Activities) DeliverNotificationActivity(ctx context.Context, rendered *
 		if rl != nil {
 			allowed, err := a.rateLimiter.Allow(ctx, vendorName, clientIDStr, rl)
 			if err != nil {
-				log.Printf("[activity] DeliverNotificationActivity rate-limit check error vendor=%s err=%v — proceeding", vendorName, err)
+				a.log.Warn("DeliverNotificationActivity rate-limit check error — proceeding",
+					zap.String("vendor", vendorName),
+					zap.Error(err),
+				)
 			} else if !allowed {
 				return domain.DeliveryResult{}, fmt.Errorf("vendor %q rate limited — Temporal will retry within SLA window", vendorName)
 			}
@@ -286,24 +376,26 @@ func (a *Activities) DeliverNotificationActivity(ctx context.Context, rendered *
 	var sendErr error
 
 	if cfg != a.cfg {
-		// Use scoped delivery
 		result, sendErr = a.deliverySvc.DeliverScoped(ctx, n, cfg.Providers)
 	} else {
-		// Use global delivery
 		result, sendErr = a.deliverySvc.Deliver(ctx, n)
 	}
 
-	log.Printf("[activity] DeliverNotificationActivity notif_id=%s provider=%s success=%v forced_vendor=%q err=%v",
-		n.ID.String(),
-		result.Provider,
-		result.Success,
-		n.ForcedVendor,
-		sendErr,
+	a.log.Info("DeliverNotificationActivity result",
+		zap.String("notif_id", n.ID.String()),
+		zap.String("provider", result.Provider),
+		zap.Bool("success", result.Success),
+		zap.String("forced_vendor", n.ForcedVendor),
+		zap.Error(sendErr),
 	)
 
-	// 4. Record attempt so the UI can display delivery data and enable status sync.
+	// 5. Record attempt using the actual Temporal attempt number.
+	attemptNum := int32(1)
+	if info, ok := activityInfo(ctx); ok {
+		attemptNum = info.Attempt
+	}
 	if a.attemptRepo != nil {
-		_ = a.attemptRepo.RecordAttemptFromResult(ctx, n.ID, 1, result)
+		_ = a.attemptRepo.RecordAttemptFromResult(ctx, n.ID, int(attemptNum), result)
 	}
 
 	_ = a.notifRepo.UpdateStatus(ctx, n.ID, domain.StatusSent)
@@ -312,6 +404,19 @@ func (a *Activities) DeliverNotificationActivity(ctx context.Context, rendered *
 	}
 
 	return result, sendErr
+}
+
+// activityInfo safely retrieves Temporal activity info from context.
+// Returns false when running outside a Temporal worker (e.g. in tests).
+func activityInfo(ctx context.Context) (info activity.Info, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			ok = false
+		}
+	}()
+	info = activity.GetInfo(ctx)
+	ok = true
+	return
 }
 
 func normalizeForcedVendorEmail(v string) string {
@@ -354,7 +459,6 @@ func (a *Activities) LogDeliveryActivity(ctx context.Context, entry LogEntry) er
 		return err
 	}
 
-	// Sync scheduled_notifications.status so the Scheduled page reflects delivery.
 	if a.schedRepo != nil {
 		_ = a.schedRepo.UpdateStatus(ctx, entry.NotificationID, entry.Status)
 	}
@@ -385,7 +489,7 @@ func (a *Activities) LogDeliveryActivity(ctx context.Context, entry LogEntry) er
 			"layer":    firstNonEmpty(entry.Layer, "temporal_workflow"),
 			"error":    strings.TrimSpace(entry.ErrorMessage),
 		},
-		CreatedAt:      time.Now(),
+		CreatedAt: time.Now(),
 	})
 	return nil
 }
@@ -397,8 +501,30 @@ func firstNonEmpty(v string, fallback string) string {
 	return fallback
 }
 
+const (
+	otpLength = 6
+	otpTTL    = 10 * time.Minute
+)
+
+// GenerateOtpActivity generates a cryptographically random 6-digit OTP and
+// stores it in Redis keyed by notification ID with a 10-minute TTL.
 func (a *Activities) GenerateOtpActivity(ctx context.Context, req *WorkflowRequest) (string, error) {
-    // Basic Mock OTP for demonstration
-    otp := "123456"
+	max := big.NewInt(1_000_000)
+	n, err := rand.Int(rand.Reader, max)
+	if err != nil {
+		return "", fmt.Errorf("generating otp: %w", err)
+	}
+	otp := fmt.Sprintf("%06d", n.Int64())
+
+	if a.cacheClient != nil {
+		key := fmt.Sprintf("otp:%s", req.ID.String())
+		if err := a.cacheClient.Set(ctx, key, otp, otpTTL); err != nil {
+			a.log.Warn("GenerateOtpActivity failed to store OTP in cache",
+				zap.String("notif_id", req.ID.String()),
+				zap.Error(err),
+			)
+		}
+	}
+
 	return otp, nil
 }

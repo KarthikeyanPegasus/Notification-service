@@ -27,6 +27,7 @@ type WebSocketWorker struct {
 
 func NewWebSocketWorker(
 	subscriber pubsub.Subscriber,
+	publisher pubsub.Publisher,
 	cacheClient *cache.Client,
 	notifRepo *repository.NotificationRepository,
 	attemptRepo *repository.AttemptRepository,
@@ -46,7 +47,7 @@ func NewWebSocketWorker(
 	return &WebSocketWorker{
 		base: newBaseWorker(
 			domain.ChannelWebSocket, subKey,
-			subscriber, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
+			subscriber, publisher, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
 		),
 		cache: cacheClient,
 	}

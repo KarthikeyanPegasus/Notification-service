@@ -2,7 +2,6 @@ package handler
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -51,6 +50,14 @@ func (h *NotificationHandler) Send(c *gin.Context) {
 		return
 	}
 
+	// Channel-aware recipient format validation (email RFC 5322, SMS E.164, webhook HTTPS).
+	for _, ch := range req.Channels {
+		if err := domain.ValidateRecipient(ch, req.Recipient); err != nil {
+			respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+			return
+		}
+	}
+
 	if h.notifSvc == nil {
 		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "notification service not configured")
 		return
@@ -61,15 +68,29 @@ func (h *NotificationHandler) Send(c *gin.Context) {
 		// We don't add time.Now() comparison here — the service layer validates
 	}
 
+	// Determine the API key scope from context (set by RequireClientScope middleware)
+	// This prevents cross-tenant notification dispatch
 	var apiKeyID *uuid.UUID
-	if caller := c.GetString("caller_id"); strings.HasPrefix(caller, "api-key:") {
-		raw := strings.TrimPrefix(caller, "api-key:")
-		if parsed, err := uuid.Parse(raw); err == nil {
+	scopedAPIKeyID := c.GetString("scoped_api_key_id")
+	if scopedAPIKeyID != "" {
+		if parsed, err := uuid.Parse(scopedAPIKeyID); err == nil {
 			apiKeyID = &parsed
 		}
 	}
 
-	resp, err := h.notifSvc.Send(c.Request.Context(), &req, "api", apiKeyID)
+	// For non-admin roles (manager, dev, api_key), reject any client_id in request body
+	// that differs from the authenticated API key scope
+	role, _ := getRoleAndSubject(c)
+	if role != "" && role != string(domain.UserRoleAdmin) {
+		if req.ClientID != nil && *req.ClientID != "" {
+			if apiKeyID == nil || *req.ClientID != apiKeyID.String() {
+				respondError(c, http.StatusForbidden, "FORBIDDEN", "cannot specify client_id that differs from authenticated scope")
+				return
+			}
+		}
+	}
+
+	resp, err := h.notifSvc.Send(c.Request.Context(), &req, "api", apiKeyID, c.GetString("request_id"))
 	if err != nil {
 		if h.log != nil {
 			h.log.Warn("send notification error", zap.Error(err))
@@ -239,6 +260,11 @@ func (h *NotificationHandler) RescheduleNotification(c *gin.Context) {
 		return
 	}
 
+	// Verify notification ownership before mutating.
+	if !h.notificationInScope(c, id) {
+		return
+	}
+
 	var req domain.RescheduleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
@@ -265,6 +291,11 @@ func (h *NotificationHandler) CancelNotification(c *gin.Context) {
 		return
 	}
 
+	// Verify notification ownership before mutating.
+	if !h.notificationInScope(c, id) {
+		return
+	}
+
 	if err := h.schedSvc.Cancel(c.Request.Context(), id); err != nil {
 		respondDomainError(c, err)
 		return
@@ -288,11 +319,78 @@ func (h *NotificationHandler) SendBulk(c *gin.Context) {
 		return
 	}
 
-	// Bulk job is accepted asynchronously — return a job ID immediately
-	jobID := "bulk-job-" + uuid.New().String()[:8]
+	// Extract recipients from user_segment
+	var recipients []string
+	if segment, ok := req.UserSegment["recipients"]; ok {
+		switch v := segment.(type) {
+		case []interface{}:
+			for _, r := range v {
+				if s, ok := r.(string); ok && s != "" {
+					recipients = append(recipients, s)
+				}
+			}
+		case []string:
+			recipients = v
+		}
+	}
+
+	if len(recipients) == 0 {
+		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", "user_segment.recipients must be a non-empty array of recipient identifiers")
+		return
+	}
+
+	// Determine the API key scope from context
+	var apiKeyID *uuid.UUID
+	scopedAPIKeyID := c.GetString("scoped_api_key_id")
+	if scopedAPIKeyID != "" {
+		if parsed, err := uuid.Parse(scopedAPIKeyID); err == nil {
+			apiKeyID = &parsed
+		}
+	}
+
+	jobID := "bulk-job-" + uuid.New().String()
+	enqueued := 0
+	failed := 0
+
+	// Fan out individual notifications in a goroutine
+	go func() {
+		for _, recipient := range recipients {
+			for _, ch := range req.Channels {
+				singleReq := &domain.SendRequest{
+					IdempotencyKey:    jobID + ":" + recipient + ":" + string(ch),
+					Channels:          []domain.Channel{ch},
+					Type:              req.Type,
+					TemplateID:        req.TemplateID,
+					Subject:           req.Subject,
+					Body:              req.Body,
+					HTML:              req.HTML,
+					TemplateVariables: req.TemplateVariables,
+					Recipient:         recipient,
+					ScheduledAt:       req.ScheduledAt,
+				}
+				ctx := c.Request.Context()
+				if _, err := h.notifSvc.Send(ctx, singleReq, "bulk", apiKeyID, jobID); err != nil {
+					h.log.Warn("bulk send: failed to enqueue",
+						zap.String("recipient", recipient),
+						zap.String("channel", string(ch)),
+						zap.Error(err),
+					)
+				}
+			}
+			enqueued++
+		}
+		h.log.Info("bulk send job completed",
+			zap.String("job_id", jobID),
+			zap.Int("total", len(recipients)),
+			zap.Int("enqueued", enqueued),
+			zap.Int("failed", failed),
+		)
+	}()
+
 	c.JSON(http.StatusAccepted, gin.H{
 		"bulk_job_id": jobID,
 		"status":      "ACCEPTED",
+		"recipients":  len(recipients),
 		"message":     "bulk notification job accepted for processing",
 	})
 }
@@ -307,7 +405,15 @@ func (h *NotificationHandler) ListScheduled(c *gin.Context) {
 		statuses = []domain.NotificationStatus{domain.NotificationStatus(st)}
 	}
 
-	items, total, err := h.schedSvc.ListScheduled(c.Request.Context(), statuses, page, pageSize)
+	// RequireClientScope middleware sets scoped_api_key_id for tenant isolation.
+	var apiKeyID *uuid.UUID
+	if scopedID := c.GetString("scoped_api_key_id"); scopedID != "" {
+		if parsed, err := uuid.Parse(scopedID); err == nil {
+			apiKeyID = &parsed
+		}
+	}
+
+	items, total, err := h.schedSvc.ListScheduled(c.Request.Context(), statuses, page, pageSize, apiKeyID)
 	if err != nil {
 		respondDomainError(c, err)
 		return
@@ -401,6 +507,26 @@ func (h *NotificationHandler) Retrigger(c *gin.Context) {
 		"notification_id": id.String(),
 		"status":          "queued",
 	})
+}
+
+// notificationInScope checks that the notification identified by id belongs to the caller's tenant scope.
+// Returns false and writes an error response if the check fails.
+func (h *NotificationHandler) notificationInScope(c *gin.Context, id uuid.UUID) bool {
+	scopedID := c.GetString("scoped_api_key_id")
+	if scopedID == "" {
+		// Admin callers with no scope restriction pass through.
+		return true
+	}
+	n, _, _, _, err := h.notifSvc.GetByID(c.Request.Context(), id)
+	if err != nil {
+		respondDomainError(c, err)
+		return false
+	}
+	if n.APIKeyID == nil || n.APIKeyID.String() != scopedID {
+		respondError(c, http.StatusForbidden, "FORBIDDEN", "notification not in scope")
+		return false
+	}
+	return true
 }
 
 // parseUUID parses a UUID path parameter, writing an error response and returning an error if invalid.

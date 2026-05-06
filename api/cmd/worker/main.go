@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -14,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/spidey/notification-service/internal/autoscaler"
 	"github.com/spidey/notification-service/internal/cache"
 	"github.com/spidey/notification-service/internal/circuit"
 	"github.com/spidey/notification-service/internal/config"
@@ -64,16 +67,24 @@ func main() {
 	govRepo := repository.NewGovernanceRepository(db)
 	apiKeyRepo := repository.NewAPIKeyRepository(db)
 	rateLimitRepo := repository.NewVendorRateLimitRepository(db)
+	prefsRepo := repository.NewUserPreferencesRepository(db)
 
 	key := cfg.Security.VendorConfigEncryptionKey
 	key = strings.TrimSpace(key)
-	if strings.Contains(key, "ENCRYPTION_KEY_HERE") {
+	if strings.Contains(key, "ENCRYPTION_KEY_HERE") || strings.Contains(key, "<SET_IN_ENV>") {
 		key = ""
 	}
-	if key == "" && cfg.Server.Mode != "release" {
-		sum := sha256.Sum256([]byte(strings.TrimSpace(cfg.JWT.Secret)))
-		key = base64.StdEncoding.EncodeToString(sum[:])
-		log.Warn("derived vendor config encryption key from jwt.secret (set NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY in production)")
+	if key == "" {
+		if cfg.Server.Mode == "release" {
+			log.Fatal("NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY must be set in release mode; refusing to start with an insecure derived key")
+		}
+		// Generate a random ephemeral key for non-release environments.
+		rawKey := make([]byte, 32)
+		if _, err := rand.Read(rawKey); err != nil {
+			log.Fatal("failed to generate random encryption key", zap.Error(err))
+		}
+		key = base64.StdEncoding.EncodeToString(rawKey)
+		log.Warn("security.vendor_config_encryption_key is empty; generated an ephemeral random key for non-release mode — set NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY explicitly in production/staging")
 	}
 	vendorCfgCrypto, err := security.NewVendorConfigCrypto(key)
 	if err != nil {
@@ -98,6 +109,7 @@ func main() {
 
 	// ── Services ─────────────────────────────────────────────────────────────
 	templateSvc := service.NewTemplateService(templateRepo, redisClient)
+	contentFilter := security.NewContentFilterWithLogger(*cfg, log)
 
 	// ── Workflow Engine ───────────────────────────────────────────────────────
 	engine, err := workflow.NewEngine(cfg, log)
@@ -136,6 +148,7 @@ func main() {
 		schedRepo,
 		eventRepo,
 		attemptRepo,
+		prefsRepo,
 		templateSvc,
 		deliverySvc,
 		publisher,
@@ -144,12 +157,73 @@ func main() {
 		vendorConfigRepo,
 		rateLimitRepo,
 		rateLimiter,
+		contentFilter,
+		log,
+	)
+
+	// ── Migration Manager ─────────────────────────────────────────────────────
+	migrationRepo := repository.NewMigrationRepository(db)
+	migrationMgr := service.NewMigrationManager(
+		migrationRepo, schedRepo, notifRepo, eventRepo, apiKeyRepo, wfClients, vendorConfigRepo, log,
 	)
 
 	// ── WorkerManager ─────────────────────────────────────────────────────────
 	// Dynamically creates workflow workers per client × channel × priority.
 	// Each client scope can choose temporal vs cadence via `workflow_orchestration` vendor config.
 	wm := worker.NewWorkerManager(wfClients, acts, apiKeyRepo, vendorConfigRepo, log)
+
+	// Hook WorkerManager callbacks into MigrationManager so old workers stay alive during migrations.
+	migrationMgr.SetWorkerManagerHooks(
+		func(ctx context.Context, migrationID uuid.UUID, apiKeyID *uuid.UUID, oldEngine, newEngine workflow.WorkflowEngine) {
+			wm.StartMigration(ctx, migrationID, apiKeyID, oldEngine, newEngine)
+		},
+		func(ctx context.Context, migrationID uuid.UUID, apiKeyID *uuid.UUID) {
+			wm.CompleteMigration(ctx, migrationID, apiKeyID)
+		},
+	)
+
+	// ── WaitGroup for background goroutines ─────────────────────────────────
+	var wg sync.WaitGroup
+
+	// ── Config Service (dynamic runtime config) ─────────────────────────────
+	configSvc := service.NewConfigService(vendorConfigRepo, publisher, log)
+
+	// ── AutoScaler ───────────────────────────────────────────────────────────
+	// Uses ConfigProvider for runtime settings (reads from DB each cycle).
+	var scaler *autoscaler.AutoScaler
+	var kafkaLagMon *autoscaler.KafkaLagMonitor
+
+	// Kafka lag monitor (only meaningful in Kafka pubsub mode)
+	if cfg.PubSub.Mode == "kafka" && len(cfg.PubSub.Kafka.Brokers) > 0 {
+		kafkaLagMon = autoscaler.NewKafkaLagMonitor(
+			cfg.PubSub.Kafka.Brokers,
+			cfg.PubSub.Kafka.ConsumerGroupID,
+			log,
+		)
+	}
+
+	// autoScalerCfgProv adapts ConfigService to autoscaler.ConfigProvider
+	var autoScalerCfgProv autoscaler.ConfigProvider = &configServiceAdapter{svc: configSvc}
+
+	scaler = autoscaler.NewAutoScaler(
+		autoScalerCfgProv,
+		&cfg.AutoScaler,
+		notifRepo,
+		kafkaLagMon,
+		log,
+	)
+
+	// Attach autoscaler to WorkerManager
+	wm.SetAutoScaler(scaler)
+
+	// Run autoscaler loop in background
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scaler.Run(ctx)
+	}()
+
+	log.Info("autoscaler initialized (config loaded from DB provider)")
 
 	// ── Kafka Dispatchers ─────────────────────────────────────────────────────
 	// One Dispatcher per channel × priority reads from the Kafka priority topic
@@ -162,7 +236,7 @@ func main() {
 			for _, p := range worker.AllPriorities() {
 				groupID := fmt.Sprintf("notif-dispatcher-%s-%s", ch, p)
 				sub := subFactory.NewForTopic(groupID)
-				d := worker.NewDispatcher(ch, p, sub, engine, log)
+				d := worker.NewDispatcher(ch, p, sub, wfClients, log)
 				dispatchers = append(dispatchers, d)
 			}
 		}
@@ -187,11 +261,51 @@ func main() {
 	})
 	mux.HandleFunc("/workers", func(w http.ResponseWriter, r *http.Request) {
 		state := wm.GetState()
+		// If the WorkerManager has no Temporal/Cadence workers but there are
+		// Kafka dispatchers, report the dispatchers as active workers (standalone mode).
+		if state.Total == 0 && len(dispatchers) > 0 {
+			state.Total = len(dispatchers)
+			state.ByPriority = make(map[string]int)
+			state.ByChannel = make(map[string]int)
+			for _, d := range dispatchers {
+				p := string(d.Priority())
+				ch := string(d.Channel())
+				state.ByPriority[p]++
+				state.ByChannel[ch]++
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(state); err != nil {
 			http.Error(w, "encode error", http.StatusInternalServerError)
 		}
 	})
+	mux.HandleFunc("/workers/migration", func(w http.ResponseWriter, r *http.Request) {
+		state := wm.GetMigrationWorkersState()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(state); err != nil {
+			http.Error(w, "encode error", http.StatusInternalServerError)
+		}
+	})
+	// Autoscaler state endpoint (when enabled)
+	mux.HandleFunc("/autoscaler", func(w http.ResponseWriter, r *http.Request) {
+		if scaler == nil {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintln(w, `{"enabled": false}`)
+			return
+		}
+		states := scaler.GetAllStates()
+		resp := map[string]interface{}{
+			"enabled": true,
+			"config":  scaler.DefaultConfig(),
+			"states":  states,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			http.Error(w, "encode error", http.StatusInternalServerError)
+		}
+	})
+	// Prometheus metrics endpoint
+	mux.Handle("/metrics", promhttp.Handler())
 	srv := &http.Server{
 		Addr:         ":8081",
 		Handler:      mux,
@@ -206,7 +320,6 @@ func main() {
 	}()
 
 	// ── Start everything ──────────────────────────────────────────────────────
-	var wg sync.WaitGroup
 
 	// WorkerManager: reconciles and manages Temporal workers.
 	wg.Add(1)
@@ -275,12 +388,28 @@ func main() {
 	log.Info("shutting down worker process")
 	cancel()
 
+	// Close Kafka lag monitor if it was created
+	if kafkaLagMon != nil {
+		if err := kafkaLagMon.Close(); err != nil {
+			log.Warn("error closing kafka lag monitor", zap.Error(err))
+		}
+	}
+
 	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer sCancel()
 	_ = srv.Shutdown(shutdownCtx)
 
 	wg.Wait()
 	log.Info("worker process stopped")
+}
+
+// configServiceAdapter adapts service.ConfigService to autoscaler.ConfigProvider.
+type configServiceAdapter struct {
+	svc service.ConfigService
+}
+
+func (a *configServiceAdapter) GetAutoScalerConfig(ctx context.Context) (*config.AutoScalerConfig, error) {
+	return a.svc.GetAutoScalerConfig(ctx)
 }
 
 func buildLogger(cfg config.LogConfig) *zap.Logger {

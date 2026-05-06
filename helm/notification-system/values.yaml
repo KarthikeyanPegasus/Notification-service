@@ -1,51 +1,81 @@
+# Default values for notification-system.
+# Override with -f or --set flags.
+
+# -- Global image registry prefix applied to all images.
 global:
   imageRegistry: ""
   imagePullSecrets: []
 
-# ── API server ────────────────────────────────────────────────────────────────
+nameOverride: ""
+fullnameOverride: ""
+
+# ── Images ────────────────────────────────────────────────────────────────────
+
+image:
+  api:
+    repository: notification-service-api
+    # Defaults to .Chart.AppVersion when empty
+    tag: ""
+    pullPolicy: IfNotPresent
+  worker:
+    repository: notification-service-worker
+    tag: ""
+    pullPolicy: IfNotPresent
+  ui:
+    repository: notification-service-ui
+    tag: ""
+    pullPolicy: IfNotPresent
+
+# ── Service Account ───────────────────────────────────────────────────────────
+
+serviceAccount:
+  create: true
+  annotations: {}
+  # Override the auto-generated name
+  name: ""
+
+# ── API ───────────────────────────────────────────────────────────────────────
+
 api:
   enabled: true
-  image:
-    repository: notification-service-api
-    tag: latest
-    pullPolicy: IfNotPresent
   replicaCount: 2
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
+  podAnnotations: {}
+  podLabels: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    readOnlyRootFilesystem: true
+
   service:
     type: ClusterIP
     port: 8080
-  autoscaling:
-    enabled: true
-    minReplicas: 2
-    maxReplicas: 10
-    targetCPUUtilizationPercentage: 70
-  env:
-    NS_SERVER_MODE: "release"
-    NS_LOG_FORMAT: "json"
-    NS_LOG_LEVEL: "info"
-    NS_PUBSUB_MODE: "gcp"
-  podAnnotations: {}
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 65534
-  securityContext:
-    readOnlyRootFilesystem: true
-    allowPrivilegeEscalation: false
+    annotations: {}
 
-# ── Worker ────────────────────────────────────────────────────────────────────
-worker:
-  enabled: true
-  image:
-    repository: notification-service-worker
-    tag: latest
-    pullPolicy: IfNotPresent
-  replicaCount: 2
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    failureThreshold: 3
+    timeoutSeconds: 5
+
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 3
+
   resources:
     requests:
       cpu: 100m
@@ -53,114 +83,424 @@ worker:
     limits:
       cpu: 500m
       memory: 512Mi
+
   autoscaling:
-    enabled: true
+    enabled: false
     minReplicas: 2
-    maxReplicas: 8
+    maxReplicas: 10
     targetCPUUtilizationPercentage: 70
-  env:
-    NS_LOG_FORMAT: "json"
-    NS_LOG_LEVEL: "info"
-    NS_PUBSUB_MODE: "gcp"
+    targetMemoryUtilizationPercentage: 80
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Extra environment variables injected directly into the container
+  extraEnv: []
+  # - name: CUSTOM_VAR
+  #   value: "value"
+
+# ── Worker ────────────────────────────────────────────────────────────────────
+
+worker:
+  enabled: true
+  replicaCount: 2
   podAnnotations: {}
+  podLabels: {}
+
   podSecurityContext:
     runAsNonRoot: true
-    runAsUser: 65534
+    runAsUser: 1000
+    fsGroup: 1000
+
   securityContext:
-    readOnlyRootFilesystem: true
     allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    readOnlyRootFilesystem: true
+
+  service:
+    type: ClusterIP
+    port: 8081
+    annotations: {}
+
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 20
+    periodSeconds: 20
+    failureThreshold: 3
+    timeoutSeconds: 5
+
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    failureThreshold: 3
+    timeoutSeconds: 3
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+    # Custom metrics (requires Prometheus Adapter in cluster)
+    customMetrics:
+      kafkaLag:
+        enabled: false
+        metricName: notif_autoscaler_kafka_lag
+        targetValue: "100"
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  extraEnv: []
 
 # ── UI ────────────────────────────────────────────────────────────────────────
+
 ui:
   enabled: true
+  replicaCount: 2
+  podAnnotations: {}
+  podLabels: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    fsGroup: 1001
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    readOnlyRootFilesystem: false
+
+  service:
+    type: ClusterIP
+    port: 3000
+    annotations: {}
+
+  livenessProbe:
+    httpGet:
+      path: /
+      port: http
+    initialDelaySeconds: 20
+    periodSeconds: 30
+    failureThreshold: 3
+    timeoutSeconds: 5
+
+  readinessProbe:
+    httpGet:
+      path: /
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 3
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+  # URL the browser (and Next.js server-side rewrites) uses to reach the API.
+  # Defaults to in-cluster API service URL when empty.
+  apiUrl: ""
+
+  # Clerk authentication (public key is safe to expose)
+  clerkPublishableKey: ""
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  extraEnv: []
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: notifications.example.com
+      # Route /v1/* directly to the API (bypasses Next.js proxy overhead).
+      # Route /* to the UI (Next.js handles /v1/* internally via rewrites).
+      paths:
+        - path: /v1
+          pathType: Prefix
+          service: api
+        - path: /
+          pathType: Prefix
+          service: ui
+  tls: []
+  # - secretName: notifications-tls
+  #   hosts:
+  #     - notifications.example.com
+
+# ── Application Configuration (non-sensitive) ─────────────────────────────────
+
+config:
+  # Environment guard — API fatally rejects debug mode when set to production/staging.
+  environment: production
+
+  server:
+    mode: release              # debug | release
+    readTimeout: 30s
+    writeTimeout: 30s
+    shutdownTimeout: 30s
+
+  database:
+    # Provide a full DSN here, OR set postgresql.enabled=true, OR fill externalDatabase.
+    dsn: ""
+    maxOpenConns: "25"
+    maxIdleConns: "5"
+    connMaxLifetime: 5m
+    migrationDir: migrations
+
+  redis:
+    # Override the auto-detected redis address when using an external cluster.
+    addr: ""
+    db: "0"
+
+  pubsub:
+    mode: kafka                         # mock | redis | kafka | gcp
+    kafkaConsumerGroupId: notification-service
+    kafkaNumPartitions: "3"
+    kafkaReplicationFactor: "1"
+    # Override the auto-detected broker list when using external Kafka.
+    kafkaBrokers: ""
+
+  cadence:
+    mode: temporal                      # temporal | cadence | standalone
+    domain: default
+    # Override the auto-detected temporal address.
+    hostPort: ""
+
+  log:
+    level: info                         # debug | info | warn | error
+    format: json                        # json | console
+
+  security:
+    rateLimitEnabled: "true"
+    rateLimitRps: "100"
+    rateLimitBurst: "100"
+    ddosBlockThreshold: "500"
+    ddosBlockDuration: 5m
+    allowedOrigins: "*"
+    requestMaxBodySizeMb: "2"
+    enableSecureHeaders: "true"
+
+  providers:
+    email:
+      primary: smtp                     # ses | mailgun | smtp | sendgrid | postmark
+      defaultFrom: no-reply@example.com
+      routingMode: backup               # backup | round_robin | only | publish_all
+      smtp:
+        host: localhost
+        port: "1025"
+      ses:
+        region: us-east-1
+        fromName: ""
+    sms:
+      routingMode: backup
+      vonage:
+        from: NotifSvc
+    push:
+      routingMode: backup
+      apns:
+        sandbox: "true"
+    webhook:
+      timeoutSeconds: "30"
+      maxRetries: "5"
+      routingMode: backup
+    slack:
+      timeoutSeconds: "30"
+      defaultUsername: ""
+      # JSON array of SlackChannelConfig objects, e.g.
+      # channels: '[{"channel_name":"alerts","webhook_url":"https://hooks.slack.com/..."}]'
+      channels: ""
+
+  # Autoscaler: MTTD and Kafka-lag based worker scaling.
+  autoscaler:
+    enabled: false
+    evaluationInterval: 15s
+    highMttdThreshold: 5s
+    mediumMttdThreshold: 10s
+    lowMttdThreshold: 15s
+    maxLagPerWorker: 50
+    cooldownPeriod: 60s
+    scaleDownFactor: 0.5
+    idleThreshold: 5m
+    unhealthyThreshold: 6
+    globalMaxWorkers: 20
+    globalMinWorkers: 1
+    mttdLookback: 3m
+
+  # Admin bootstrap: creates an admin user on first startup if email is set.
+  admin:
+    email: ""
+    name: Admin
+
+# ── Secrets (sensitive values) ────────────────────────────────────────────────
+# For production use external-secrets or sealed-secrets to inject these.
+
+secrets:
+  # Set create=false to reference an existing Secret by name instead.
+  create: true
+  # Defaults to <fullname>-secrets when empty.
+  name: ""
+
+  # Core
+  jwtSecret: ""
+  # 32-byte base64-encoded or raw string key for vendor config encryption.
+  vendorConfigEncryptionKey: ""
+  adminPassword: ""
+
+  # JWT service secret (used for OTP service-auth)
+  jwtServiceSecret: ""
+
+  # Clerk (optional — only needed when using Clerk auth)
+  clerkSecretKey: ""
+  clerkWebhookSecret: ""
+  clerkJwksUrl: "https://clerk.example.com/.well-known/jwks.json"
+
+  # Email providers (fill the one matching config.providers.email.primary)
+  smtpUsername: ""
+  smtpPassword: ""
+  sesAccessKeyId: ""
+  sesSecretAccessKey: ""
+  mailgunDomain: ""
+  mailgunApiKey: ""
+  mailgunFrom: ""
+  mailgunWebhookSigningKey: ""
+  mailgunReplyTo: ""
+  sendgridApiKey: ""
+  sendgridFromEmail: ""
+  sendgridFromName: ""
+  sendgridReplyTo: ""
+  postmarkServerToken: ""
+  postmarkFromEmail: ""
+  postmarkFromName: ""
+  postmarkReplyTo: ""
+
+  # SMS providers (fill the one matching config.providers.sms.primary)
+  twilioAccountSid: ""
+  twilioAuthToken: ""
+  twilioFromNumber: ""
+  plivoAuthId: ""
+  plivoAuthToken: ""
+  plivoFromNumber: ""
+  vonageApiKey: ""
+  vonageApiSecret: ""
+  messagebirdAccessKey: ""
+  messagebirdOriginator: ""
+
+  # Push providers
+  fcmServiceAccountJson: ""
+  onesignalAppId: ""
+  onesignalRestApiKey: ""
+  pusherInstanceId: ""
+  pusherSecretKey: ""
+  apnsKeyId: ""
+  apnsTeamId: ""
+  apnsBundleId: ""
+
+  # Webhook / Slack
+  webhookSigningSecret: ""
+  slackWebhookUrl: ""
+  slackDefaultUsername: ""
+  # JSON array: '[{"channel_name":"alerts","webhook_url":"https://..."}]'
+  slackChannels: ""
+
+  # Pushwoosh
+  pushwooshApplicationCode: ""
+  pushwooshApiAccessToken: ""
+
+# ── Kafka Topic Initialisation Job ───────────────────────────────────────────
+
+kafkaInit:
+  # Creates all 20 notification + internal topics on helm install/upgrade.
+  enabled: true
+  # Override to provide your own broker list (falls back to config.pubsub.kafkaBrokers).
+  brokers: ""
   image:
-    repository: notification-service-ui
-    tag: latest
+    repository: bitnami/kafka
+    tag: "3.7"
     pullPolicy: IfNotPresent
-  replicaCount: 1
   resources:
     requests:
       cpu: 50m
       memory: 64Mi
     limits:
       cpu: 200m
-      memory: 256Mi
-  service:
-    type: ClusterIP
-    port: 3000
-  env:
-    NEXT_PUBLIC_API_URL: "https://api.notifications.example.com"
-  podAnnotations: {}
+      memory: 128Mi
 
-# ── Ingress ───────────────────────────────────────────────────────────────────
-ingress:
-  enabled: true
-  className: nginx
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-  hosts:
-    - host: notifications.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-          service: ui
-        - path: /v1
-          pathType: Prefix
-          service: api
-        - path: /health
-          pathType: Prefix
-          service: api
-        - path: /webhooks
-          pathType: Prefix
-          service: api
-  tls:
-    - secretName: notifications-tls
-      hosts:
-        - notifications.example.com
+# ── External Services (used when subcharts are disabled) ─────────────────────
 
-# ── Secrets (override with --set or sealed secrets) ───────────────────────────
-secrets:
-  databaseDsn: "postgres://notif:changeme@postgres:5432/notifdb?sslmode=require"
-  redisAddr: "redis:6379"
-  jwtSecret: "change-me-in-production"
-  serviceSecret: "internal-service-token"
-  gcpProjectId: ""
-  awsAccessKeyId: ""
-  awsSecretAccessKey: ""
-  twilioAccountSid: ""
-  twilioAuthToken: ""
-  fcmServiceAccountJson: ""
-  # Encrypts vendor configs at rest (base64 32 bytes recommended).
-  vendorConfigEncryptionKey: ""
-  # Webhook signing secret (HMAC) used to validate inbound provider webhooks.
-  webhookSigningSecret: ""
-  # Additional secrets to inject into the shared Secret.
-  extra: {}
+externalDatabase:
+  host: ""
+  port: 5432
+  user: notif
+  password: ""
+  database: notifdb
 
-# ── ConfigMap ─────────────────────────────────────────────────────────────────
-config:
-  pubsubMode: "gcp"
-  serverPort: "8080"
-  migrationDir: "migrations"
-  # Default workflow engine settings. Per-client overrides come from DB vendor config `workflow_orchestration`.
-  cadence:
-    mode: "standalone" # standalone | cadence | temporal
-    hostPort: ""
-    domain: ""
-  # Additional non-secret config env vars to inject into the shared ConfigMap.
-  extra: {}
+externalRedis:
+  host: ""
+  port: 6379
+  password: ""
 
-# ── PostgreSQL (sub-chart, disable when using external) ───────────────────────
+externalTemporal:
+  host: ""
+  port: 7233
+
+externalKafka:
+  # Comma-separated broker list, e.g. "broker1:9092,broker2:9092"
+  brokers: ""
+
+# ── Bitnami Subcharts ─────────────────────────────────────────────────────────
+# These deploy PostgreSQL and Redis inside the same release.
+# Set enabled=false and fill externalDatabase / externalRedis to use your own.
+
 postgresql:
-  enabled: false  # set to true for self-hosted; prefer managed CloudSQL/RDS in prod
+  enabled: true
   auth:
     username: notif
     password: notif
     database: notifdb
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
 
-# ── Redis (sub-chart, disable when using external) ────────────────────────────
 redis:
-  enabled: false  # set to true for self-hosted; prefer managed ElastiCache/Memorystore
+  enabled: true
   auth:
     enabled: false
+  master:
+    persistence:
+      enabled: true
+      size: 4Gi

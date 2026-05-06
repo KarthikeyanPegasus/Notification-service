@@ -1,17 +1,21 @@
 package handler
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	clerkjwt "github.com/clerk/clerk-sdk-go/v2/jwt"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/spidey/notification-service/internal/config"
 	"github.com/spidey/notification-service/internal/domain"
+	"github.com/spidey/notification-service/internal/repository"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
@@ -71,10 +75,27 @@ func Recovery(log *zap.Logger) gin.HandlerFunc {
 	}
 }
 
-// CORS adds permissive CORS headers for development; tighten for production.
-func CORS() gin.HandlerFunc {
+// CORS enforces an allowed-origins allowlist. Pass an empty slice to disallow
+// all cross-origin requests (safe default); pass ["*"] only in local dev.
+func CORS(allowedOrigins []string) gin.HandlerFunc {
+	allowed := make(map[string]bool, len(allowedOrigins))
+	wildcard := false
+	for _, o := range allowedOrigins {
+		if o == "*" {
+			wildcard = true
+		} else {
+			allowed[o] = true
+		}
+	}
+
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		origin := c.GetHeader("Origin")
+		if origin != "" {
+			if wildcard || allowed[origin] {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Vary", "Origin")
+			}
+		}
 		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Request-ID,Idempotency-Key,X-API-Key,X-Service-Token")
 		if c.Request.Method == http.MethodOptions {
@@ -93,7 +114,13 @@ type AuthAPIKeyVerifier interface {
 
 // AnyAuth allows a request if either a valid JWT bearer token is present or a valid X-API-Key is present.
 // In debug mode, it allows requests with no credentials (matching JWTAuth behavior).
-func AnyAuth(jwtSecret string, isDebugMode bool, verifier AuthAPIKeyVerifier) gin.HandlerFunc {
+// userRepo is optional: when provided, it is used to look up a user's role from the DB if the
+// Clerk JWT does not carry a role claim (i.e. no JWT template is configured in Clerk).
+func AnyAuth(jwtSecret string, isDebugMode bool, verifier AuthAPIKeyVerifier, userRepo ...*repository.UserRepository) gin.HandlerFunc {
+	var repo *repository.UserRepository
+	if len(userRepo) > 0 {
+		repo = userRepo[0]
+	}
 	return func(c *gin.Context) {
 		// Debug shortcut (same as JWTAuth)
 		if isDebugMode && c.GetHeader("Authorization") == "" && c.GetHeader("X-API-Key") == "" {
@@ -103,8 +130,41 @@ func AnyAuth(jwtSecret string, isDebugMode bool, verifier AuthAPIKeyVerifier) gi
 			return
 		}
 
-		// Try JWT first (preserves existing behavior for UI/admin usage)
+		// Try Clerk JWT first (new auth mechanism)
 		authHeader := c.GetHeader("Authorization")
+		if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+			claims, err := clerkJWTFallback(tokenStr)
+			if err == nil {
+				sub, ok := claims["sub"].(string)
+				if !ok || strings.TrimSpace(sub) == "" {
+					respondError(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid token subject")
+					c.Abort()
+					return
+				}
+				// If role is missing from the JWT (no Clerk JWT template configured),
+				// fall back to the role stored in our database.
+				if claims["role"] == "" && repo != nil {
+					if u, err := repo.GetByClerkID(c.Request.Context(), sub); err == nil && u != nil {
+						claims["role"] = string(u.Role)
+					} else {
+						// User not in DB yet (webhook not configured) — fetch from Clerk API
+						// and auto-create the record so the correct role is used.
+						claims["role"] = string(syncClerkUser(c.Request.Context(), sub, repo))
+					}
+				}
+				// Final safety net: ensure role is never empty for a verified Clerk user.
+				if claims["role"] == "" {
+					claims["role"] = string(domain.UserRoleDev)
+				}
+				c.Set("claims", claims)
+				c.Set("caller_id", sub)
+				c.Next()
+				return
+			}
+		}
+
+		// Try HMAC JWT second (legacy behavior for backward compatibility)
 		if authHeader != "" {
 			parts := strings.SplitN(authHeader, " ", 2)
 			if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
@@ -126,9 +186,6 @@ func AnyAuth(jwtSecret string, isDebugMode bool, verifier AuthAPIKeyVerifier) gi
 					return
 				}
 			}
-			respondError(c, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token")
-			c.Abort()
-			return
 		}
 
 		// Fall back to API key
@@ -304,8 +361,9 @@ func RequestSizeLimiter(maxMB int) gin.HandlerFunc {
 }
 
 type clientLimiter struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
+	limiter     *rate.Limiter
+	lastSeen    time.Time
+	deniedCount int
 }
 
 // RateLimiter appies per-IP rate limiting and DDoS prevention.
@@ -374,13 +432,102 @@ func RateLimiter(cfg config.SecurityConfig) gin.HandlerFunc {
 		mu.Unlock()
 
 		if !cl.limiter.Allow() {
+			mu.Lock()
+			cl.deniedCount++
+			shouldBlock := cfg.DDoS.BlockThreshold > 0 && cl.deniedCount >= cfg.DDoS.BlockThreshold
+			if shouldBlock {
+				cl.deniedCount = 0
+			}
+			mu.Unlock()
+
+			if shouldBlock {
+				blockUntil := time.Now().Add(cfg.DDoS.BlockDuration)
+				blockListMu.Lock()
+				globalBlockList[ip] = blockUntil
+				blockListMu.Unlock()
+				c.Header("X-Security-Action", "Blocked")
+				respondError(c, http.StatusForbidden, "ACCESS_DENIED", "your IP has been temporarily blocked due to excessive requests")
+				c.Abort()
+				return
+			}
 			c.Header("Retry-After", "1")
 			respondError(c, http.StatusTooManyRequests, "RATE_LIMITED", "too many requests")
 			c.Abort()
 			return
 		}
 
+		// Successful request resets abuse counter.
+		mu.Lock()
+		cl.deniedCount = 0
+		mu.Unlock()
 		c.Next()
+	}
+}
+
+// RequireOwnershipOrRole checks that the caller owns the resource identified by :user_id
+// or has one of the specified elevated roles. The caller's identity is extracted from
+// JWT claims (sub) or the debug-admin fallback.
+func requireOwnershipOrRole(allowedRoles ...string) gin.HandlerFunc {
+	allowedSet := make(map[string]struct{}, len(allowedRoles))
+	for _, r := range allowedRoles {
+		allowedSet[r] = struct{}{}
+	}
+	return func(c *gin.Context) {
+		userID := c.Param("user_id")
+		if userID == "" {
+			c.Next()
+			return
+		}
+
+		claimsAny, ok := c.Get("claims")
+		if !ok {
+			respondError(c, http.StatusUnauthorized, "UNAUTHORIZED", "missing auth claims")
+			c.Abort()
+			return
+		}
+
+		// Extract caller sub and role
+		var callerSub string
+		var callerRole string
+		switch v := claimsAny.(type) {
+		case jwt.MapClaims:
+			if s, ok := v["sub"].(string); ok {
+				callerSub = s
+			}
+			if r, ok := v["role"].(string); ok {
+				callerRole = r
+			}
+		case map[string]interface{}:
+			if s, ok := v["sub"].(string); ok {
+				callerSub = s
+			}
+			if r, ok := v["role"].(string); ok {
+				callerRole = r
+			}
+		}
+
+		// Allow if caller has one of the elevated roles (admin, support)
+		if callerRole != "" {
+			if _, elevated := allowedSet[callerRole]; elevated {
+				c.Next()
+				return
+			}
+		}
+
+		// Allow if caller owns the resource (sub matches user_id)
+		if callerSub != "" && callerSub == userID {
+			c.Next()
+			return
+		}
+
+		// Debug admin bypass
+		if callerSub == "debug-admin" {
+			c.Next()
+			return
+		}
+
+		respondError(c, http.StatusForbidden, "FORBIDDEN", "access denied: you can only access your own preferences")
+		c.Abort()
 	}
 }
 
@@ -392,6 +539,66 @@ type ErrorResponse struct {
 }
 
 // respondError writes a standard error JSON response.
+
+// clerkJWTFallback attempts to verify a token as a Clerk JWT first,
+// then falls back to the old HMAC-signed JWT for backward compatibility.
+//
+// During the migration period, both Clerk-issued tokens and legacy
+// HMAC tokens are accepted.
+func clerkJWTFallback(tokenStr string) (map[string]interface{}, error) {
+	if tokenStr == "" {
+		return nil, errors.New("empty token provided")
+	}
+	claims, err := clerkjwt.Verify(context.Background(), &clerkjwt.VerifyParams{Token: tokenStr})
+	if err == nil && claims != nil {
+		return map[string]interface{}{
+			"sub":  claims.Subject,
+			"sid":  claims.SessionID,
+			"role": extractRole(claims),
+		}, nil
+	}
+	return nil, err
+}
+
+// internalOnly restricts an endpoint to requests originating from localhost or
+// RFC 1918 private address ranges. Use this for observability endpoints like /metrics
+// that must not be exposed on the public-facing interface.
+func internalOnly() gin.HandlerFunc {
+	privateNets := func() []*net.IPNet {
+		cidrs := []string{
+			"127.0.0.0/8",    // loopback IPv4
+			"::1/128",        // loopback IPv6
+			"10.0.0.0/8",     // RFC 1918
+			"172.16.0.0/12",  // RFC 1918
+			"192.168.0.0/16", // RFC 1918
+			"fc00::/7",       // IPv6 ULA
+		}
+		nets := make([]*net.IPNet, 0, len(cidrs))
+		for _, cidr := range cidrs {
+			_, n, _ := net.ParseCIDR(cidr)
+			nets = append(nets, n)
+		}
+		return nets
+	}()
+
+	return func(c *gin.Context) {
+		ip := net.ParseIP(c.ClientIP())
+		if ip == nil {
+			respondError(c, http.StatusForbidden, "FORBIDDEN", "unable to determine client IP")
+			c.Abort()
+			return
+		}
+		for _, n := range privateNets {
+			if n.Contains(ip) {
+				c.Next()
+				return
+			}
+		}
+		respondError(c, http.StatusForbidden, "FORBIDDEN", "access restricted to internal network")
+		c.Abort()
+	}
+}
+
 func respondError(c *gin.Context, status int, code, message string) {
 	c.JSON(status, ErrorResponse{
 		Code:      code,
@@ -411,5 +618,22 @@ func respondDomainError(c *gin.Context, err error) {
 		return
 	}
 
-	respondError(c, status, code, err.Error())
+	// Sanitize 500 errors to prevent information leakage
+	message := err.Error()
+	if status >= 500 {
+		// Log the full error internally for debugging
+		requestID := c.GetString("request_id")
+		if logger, ok := c.Get("logger"); ok {
+			if zapLogger, ok := logger.(*zap.Logger); ok {
+				zapLogger.Error("internal server error",
+					zap.String("request_id", requestID),
+					zap.Error(err),
+				)
+			}
+		}
+		// Return generic message to client
+		message = "an unexpected error occurred"
+	}
+
+	respondError(c, status, code, message)
 }

@@ -1,6 +1,7 @@
 package email
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,16 +10,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/keighl/postmark"
-
 	"github.com/spidey/notification-service/internal/config"
 	"github.com/spidey/notification-service/internal/domain"
 )
 
+const postmarkAPIBase = "https://api.postmarkapp.com"
+
 type PostmarkSender struct {
-	client      *postmark.Client
 	fromEmail   string
 	fromName    string
+	replyTo     string
 	serverToken string
 	httpClient  *http.Client
 }
@@ -28,9 +29,9 @@ func NewPostmarkSender(cfg config.PostmarkConfig) *PostmarkSender {
 		return nil
 	}
 	return &PostmarkSender{
-		client:      postmark.NewClient(strings.TrimSpace(cfg.ServerToken), ""),
 		fromEmail:   strings.TrimSpace(cfg.FromEmail),
 		fromName:    strings.TrimSpace(cfg.FromName),
+		replyTo:     strings.TrimSpace(cfg.ReplyTo),
 		serverToken: strings.TrimSpace(cfg.ServerToken),
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 	}
@@ -72,49 +73,75 @@ func (s *PostmarkSender) Send(ctx context.Context, n *domain.Notification) (doma
 		from = fmt.Sprintf("%s <%s>", s.fromName, s.fromEmail)
 	}
 
-	email := postmark.Email{
-		From:     from,
-		To:       toEmail,
-		Subject:  subject,
-		TextBody: textBody,
-		HtmlBody: htmlBody,
-		// Embed notification ID in Metadata so it appears in webhook payloads
-		Metadata: map[string]string{
+	payload := map[string]interface{}{
+		"From":     from,
+		"To":       toEmail,
+		"Subject":  subject,
+		"TextBody": textBody,
+		"HtmlBody": htmlBody,
+		"ReplyTo":  s.replyTo,
+		"Metadata": map[string]string{
 			"notification_id": n.ID.String(),
 		},
 	}
 
-	// keighl/postmark doesn't accept context; send in a goroutine and select.
-	type result struct {
-		resp postmark.EmailResponse
-		err  error
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return domain.DeliveryResult{Provider: s.ProviderName(), ErrorMessage: err.Error()}, err
 	}
-	ch := make(chan result, 1)
-	go func() {
-		resp, err := s.client.SendEmail(email)
-		ch <- result{resp: resp, err: err}
-	}()
 
-	select {
-	case <-ctx.Done():
-		latencyMs := int(time.Since(start).Milliseconds())
-		return domain.DeliveryResult{Provider: s.ProviderName(), LatencyMs: latencyMs, ErrorMessage: ctx.Err().Error()}, ctx.Err()
-	case r := <-ch:
-		latencyMs := int(time.Since(start).Milliseconds())
-		if r.err != nil {
-			return domain.DeliveryResult{Provider: s.ProviderName(), LatencyMs: latencyMs, ErrorMessage: r.err.Error()}, r.err
-		}
-		msgID := strings.TrimSpace(r.resp.MessageID)
-		if msgID == "" {
-			msgID = fmt.Sprintf("postmark-%d", time.Now().UnixMilli())
-		}
-		return domain.DeliveryResult{
-			Success:       true,
-			Provider:      s.ProviderName(),
-			ProviderMsgID: msgID,
-			LatencyMs:     latencyMs,
-		}, nil
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, postmarkAPIBase+"/email", bytes.NewReader(body))
+	if err != nil {
+		return domain.DeliveryResult{Provider: s.ProviderName(), ErrorMessage: err.Error()}, err
 	}
+	req.Header.Set("X-Postmark-Server-Token", s.serverToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	latencyMs := int(time.Since(start).Milliseconds())
+	if err != nil {
+		return domain.DeliveryResult{Provider: s.ProviderName(), LatencyMs: latencyMs, ErrorMessage: err.Error()}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if resp.StatusCode >= 400 {
+		return domain.DeliveryResult{
+			Provider:     s.ProviderName(),
+			LatencyMs:    latencyMs,
+			ErrorCode:    fmt.Sprintf("HTTP_%d", resp.StatusCode),
+			ErrorMessage: string(respBody),
+		}, fmt.Errorf("postmark returned HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		MessageID string `json:"MessageID"`
+		ErrorCode int    `json:"ErrorCode"`
+		Message   string `json:"Message"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return domain.DeliveryResult{Provider: s.ProviderName(), LatencyMs: latencyMs, ErrorMessage: err.Error()}, err
+	}
+	if result.ErrorCode != 0 {
+		return domain.DeliveryResult{
+			Provider:     s.ProviderName(),
+			LatencyMs:    latencyMs,
+			ErrorCode:    fmt.Sprintf("POSTMARK_%d", result.ErrorCode),
+			ErrorMessage: result.Message,
+		}, fmt.Errorf("postmark error %d: %s", result.ErrorCode, result.Message)
+	}
+
+	msgID := strings.TrimSpace(result.MessageID)
+	if msgID == "" {
+		msgID = fmt.Sprintf("postmark-%d", time.Now().UnixMilli())
+	}
+	return domain.DeliveryResult{
+		Success:       true,
+		Provider:      s.ProviderName(),
+		ProviderMsgID: msgID,
+		LatencyMs:     latencyMs,
+	}, nil
 }
 
 // GetStatus polls Postmark's outbound message details endpoint for delivery status.
@@ -128,7 +155,7 @@ func (s *PostmarkSender) GetStatus(ctx context.Context, providerMsgID string) (d
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		"https://api.postmarkapp.com/messages/outbound/"+providerMsgID+"/details", nil)
+		postmarkAPIBase+"/messages/outbound/"+providerMsgID+"/details", nil)
 	if err != nil {
 		return domain.DeliveryResult{Provider: s.ProviderName(), ProviderMsgID: providerMsgID}, err
 	}
@@ -154,7 +181,7 @@ func (s *PostmarkSender) GetStatus(ctx context.Context, providerMsgID string) (d
 	var result struct {
 		MessageEvents []struct {
 			RecordType string `json:"RecordType"`
-			Type       string `json:"Type"` // HardBounce, SoftBounce, etc.
+			Type       string `json:"Type"`
 		} `json:"MessageEvents"`
 		Status string `json:"Status"`
 	}
@@ -173,16 +200,15 @@ func (s *PostmarkSender) GetStatus(ctx context.Context, providerMsgID string) (d
 			}, nil
 		case "Bounce":
 			return domain.DeliveryResult{
-				Success:      false,
-				Provider:     s.ProviderName(),
+				Success:       false,
+				Provider:      s.ProviderName(),
 				ProviderMsgID: providerMsgID,
-				ErrorCode:    ev.Type,
-				VendorStatus: "bounced",
+				ErrorCode:     ev.Type,
+				VendorStatus:  "bounced",
 			}, nil
 		}
 	}
 
-	// No definitive event yet — return current status string
 	vendorStatus := result.Status
 	if vendorStatus == "" {
 		vendorStatus = "unknown"

@@ -51,7 +51,7 @@ func main() {
 	// 4. Setup SMS Worker
 	smsSenders := provider.InitializeSMSSenders(cfg.Providers.SMS)
 	registry := circuit.NewRegistry(logger)
-	smsWorker := worker.NewSMSWorker(mockSub, smsSenders, notifRepo, attemptRepo, eventRepo, registry, logger)
+	smsWorker := worker.NewSMSWorker(mockSub, mockPub, smsSenders, notifRepo, attemptRepo, eventRepo, nil, nil, cfg, registry, logger)
 
 	// Start worker
 	go func() {

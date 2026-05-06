@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/clerk/clerk-sdk-go/v2"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -21,6 +22,7 @@ import (
 	"github.com/spidey/notification-service/internal/config"
 	"github.com/spidey/notification-service/internal/domain"
 	"github.com/spidey/notification-service/internal/handler"
+	ws "github.com/spidey/notification-service/internal/provider/websocket"
 	"github.com/spidey/notification-service/internal/pubsub"
 	"github.com/spidey/notification-service/internal/repository"
 	"github.com/spidey/notification-service/internal/security"
@@ -40,6 +42,15 @@ func main() {
 
 	log := buildLogger(cfg.Log)
 	defer log.Sync() //nolint:errcheck
+
+	// Guard: debug mode must never run in a production or staging environment.
+	if cfg.Server.Mode == "debug" {
+		env := strings.ToLower(strings.TrimSpace(os.Getenv("ENVIRONMENT")))
+		switch env {
+		case "production", "prod", "staging", "stage":
+			log.Fatal("debug mode is not allowed in production/staging; set NS_SERVER_MODE=release")
+		}
+	}
 
 	ctx := context.Background()
 
@@ -101,19 +112,27 @@ func main() {
 	attemptRepo := repository.NewAttemptRepository(db)
 	templateRepo := repository.NewTemplateRepository(db)
 	webhookEventRepo := repository.NewWebhookEventRepository(db)
+	migrationRepo := repository.NewMigrationRepository(db)
 	key := cfg.Security.VendorConfigEncryptionKey
 	key = strings.TrimSpace(key)
 	// Treat the default placeholder as "unset" for dev ergonomics.
-	if strings.Contains(key, "ENCRYPTION_KEY_HERE") {
+	if strings.Contains(key, "ENCRYPTION_KEY_HERE") || strings.Contains(key, "<SET_IN_ENV>") {
 		key = ""
 	}
-	if key == "" && cfg.Server.Mode != "release" {
-		// Dev-friendly stable key derivation: if a user didn't set a dedicated vendor-config key,
-		// derive a deterministic 32-byte key from the JWT secret so DB-stored configs survive restarts.
-		// In production you MUST set NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY explicitly.
-		sum := sha256.Sum256([]byte(strings.TrimSpace(cfg.JWT.Secret)))
-		key = base64.StdEncoding.EncodeToString(sum[:])
-		log.Warn("security.vendor_config_encryption_key is empty/placeholder; derived a stable key from jwt.secret for non-release mode (set NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY in production)")
+	if key == "" {
+		if cfg.Server.Mode == "release" {
+			log.Fatal("NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY must be set in release mode; refusing to start with an insecure derived key")
+		}
+		// Generate a random ephemeral key for non-release environments.
+		// This key is ephemeral — vendor configs encrypted with it will be
+		// unrecoverable on next restart. Set NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY
+		// explicitly for any environment that stores real vendor credentials.
+		rawKey := make([]byte, 32)
+		if _, err := rand.Read(rawKey); err != nil {
+			log.Fatal("failed to generate random encryption key", zap.Error(err))
+		}
+		key = base64.StdEncoding.EncodeToString(rawKey)
+		log.Warn("security.vendor_config_encryption_key is empty; generated an ephemeral random key for non-release mode — set NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY explicitly in production/staging")
 	}
 	vendorCfgCrypto, err := security.NewVendorConfigCrypto(key)
 	if err != nil {
@@ -124,6 +143,17 @@ func main() {
 	apiKeyRepo := repository.NewAPIKeyRepository(db)
 	userRepo := repository.NewUserRepository(db)
 	rateLimitRepo := repository.NewVendorRateLimitRepository(db)
+	prefsRepo := repository.NewUserPreferencesRepository(db)
+
+	log.Info("Initializing Clerk SDK",
+		zap.Bool("clerk_key_configured", strings.TrimSpace(cfg.Clerk.SecretKey) != ""),
+	)
+	if strings.TrimSpace(cfg.Clerk.SecretKey) != "" {
+		clerk.SetKey(strings.TrimSpace(cfg.Clerk.SecretKey))
+	} else {
+		log.Warn("clerk.secret_key is empty; Clerk JWT verification will fail (set NS_CLERK_SECRET_KEY)")
+	}
+
 
 	// Bootstrap admin user (optional, config-driven)
 	if cfg.Admin.Email != "" && cfg.Admin.Password != "" {
@@ -138,7 +168,7 @@ func main() {
 
 	// Services
 	templateSvc := service.NewTemplateService(templateRepo, redisClient)
-	prefsSvc := service.NewPreferencesService(redisClient)
+	prefsSvc := service.NewPreferencesService(prefsRepo, redisClient, log)
 	otpSvc := service.NewOTPService(redisClient)
 	wfClients := service.NewWorkflowClientProvider(engine, vendorConfigRepo, cfg, log)
 	notifSvc := service.NewNotificationService(
@@ -147,24 +177,64 @@ func main() {
 	)
 	schedSvc := service.NewSchedulerService(schedRepo, notifRepo, eventRepo, wfClients, log)
 	reconSvc := service.NewReconciliationService(notifRepo, log)
-	configSvc := service.NewConfigService(vendorConfigRepo, publisher, log)
+
+	// Migration Manager for orchestration changes.
+	migrationMgr := service.NewMigrationManager(
+		migrationRepo, schedRepo, notifRepo, eventRepo, apiKeyRepo, wfClients, vendorConfigRepo, log,
+	)
+
+	// Create config service and wire migration manager for orchestration changes.
+	configSvcImpl := service.NewConfigService(vendorConfigRepo, publisher, log)
+	configSvcImpl.WithMigrationManager(migrationMgr)
+	configSvc := configSvcImpl
 	apiKeySvc := service.NewAPIKeyService(apiKeyRepo)
-	authSvc := service.NewAuthService(cfg, userRepo)
+
+	// Clerk authentication
+	var clerkWebhookHandler *handler.ClerkWebhookHandler
+	if cfg.Clerk.WebhookSecret != "" {
+		var err error
+		clerkWebhookHandler, err = handler.NewClerkWebhookHandler(cfg.Clerk.WebhookSecret, userRepo, log)
+		if err != nil {
+			log.Warn("failed to init Clerk webhook handler", zap.Error(err))
+		}
+	} else {
+		log.Warn("Clerk webhook secret not configured; user sync via webhooks disabled")
+	}
+
+	// WebSocket Hub — manages real-time notification delivery connections
+	wsHub := ws.NewHub(log)
+	go wsHub.Run()
+
+	// DLQ Repository
+	dlqRepo := repository.NewDLQRepository(db)
 
 	// Handlers
 	notifHandler := handler.NewNotificationHandler(notifSvc, schedSvc, userRepo, log)
 	otpHandler := handler.NewOTPHandler(otpSvc, notifSvc, log)
 	webhookHandler := handler.NewWebhookHandler(eventRepo, notifRepo, attemptRepo, webhookEventRepo, govRepo, cfg, log)
-	prefsHandler := handler.NewPreferencesHandler(prefsSvc, log)
+	prefsHandler := handler.NewPreferencesHandler(prefsSvc, userRepo, log)
 	reportHandler := handler.NewReportHandler(webhookEventRepo, notifRepo, attemptRepo, userRepo, cfg, vendorConfigRepo, log)
-	adminHandler := handler.NewAdminHandler(configSvc, rateLimitRepo, notifRepo, cfg.Cadence.Mode, log)
+	vendorMigrationRepo := repository.NewVendorMigrationRepository(db)
+	vendorMigrationSvc := service.NewVendorMigrationService(vendorMigrationRepo, vendorConfigRepo, configSvc, publisher, log)
+
+	adminHandler := handler.NewAdminHandler(
+		configSvc,
+		rateLimitRepo,
+		notifRepo,
+		cfg.Cadence.Mode,
+		cfg.PubSub.Mode,
+		cfg.PubSub.Kafka.Brokers,
+		log,
+	).WithMigrationManager(migrationMgr).WithVendorMigrationService(vendorMigrationSvc).WithDLQRepository(dlqRepo)
 	testDeliveryHandler := handler.NewTestDeliveryHandler(vendorConfigRepo, notifSvc, log)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeySvc, log)
-	authHandler := handler.NewAuthHandler(authSvc)
 	userAdminHandler := handler.NewUserAdminHandler(userRepo, apiKeyRepo)
+	invitationHandler := handler.NewInvitationHandler()
 	meHandler := handler.NewMeHandler(userRepo, apiKeyRepo, apiKeySvc)
 	govHandler := handler.NewGovernanceHandler(govRepo, log)
 	tmplHandler := handler.NewTemplateHandler(templateRepo, templateSvc, log)
+	wsHandler := handler.NewWebSocketHandler(wsHub, log)
+	dlqHandler := handler.NewDLQHandler(dlqRepo, notifSvc, log)
 
 	// Standalone scheduler is now replaced by Temporal's native scheduling logic.
 	// No longer need a local goroutine ticker for ProcessDue.
@@ -182,11 +252,14 @@ func main() {
 		AdminHandler:        adminHandler,
 		TestDeliveryHandler: testDeliveryHandler,
 		APIKeyHandler:       apiKeyHandler,
-		AuthHandler:         authHandler,
+		ClerkWebhookHandler: clerkWebhookHandler,
+		InvitationHandler:   invitationHandler,
 		UserAdminHandler:    userAdminHandler,
 		MeHandler:           meHandler,
 		GovernanceHandler:   govHandler,
 		TemplateHandler:     tmplHandler,
+		WSHandler:           wsHandler,
+		DLQHandler:          dlqHandler,
 		CircuitRegistry:     cbRegistry,
 		Config:              cfg,
 		APIKeyVerifier:      apiKeySvc,
@@ -204,6 +277,9 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
+	schedulerCtx, stopScheduler := context.WithCancel(context.Background())
+	go notifSvc.StartStandaloneScheduler(schedulerCtx)
+
 	go func() {
 		log.Info("api server starting", zap.Int("port", cfg.Server.Port))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -213,6 +289,7 @@ func main() {
 
 	<-quit
 	log.Info("shutting down api server")
+	stopScheduler()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer cancel()

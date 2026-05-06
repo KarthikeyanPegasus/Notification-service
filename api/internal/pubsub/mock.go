@@ -57,6 +57,21 @@ func (p *MockPublisher) Chan(channel string) <-chan *Message {
 	return p.channels[channel]
 }
 
+func (p *MockPublisher) PublishToDLQ(_ context.Context, msg *Message, reason string) (string, error) {
+	// For mock publisher, log the DLQ message and return success
+	msgID := uuid.New().String()
+	if p.log != nil {
+		data, _ := json.Marshal(msg)
+		p.log.Info("mock pubsub DLQ message",
+			zap.String("notification_id", msg.NotificationID),
+			zap.String("reason", reason),
+			zap.String("msg_id", msgID),
+			zap.String("payload", string(data)),
+		)
+	}
+	return msgID, nil
+}
+
 func (p *MockPublisher) Close() error { return nil }
 
 // MockSubscriber consumes from MockPublisher channels.

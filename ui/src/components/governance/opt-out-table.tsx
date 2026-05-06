@@ -31,6 +31,7 @@ import { Trash2, Plus } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { toast } from 'sonner'
 import { truncateId } from '@/lib/utils'
+import { getOptOuts, deleteOptOut, createOptOut } from '@/lib/api'
 
 interface OptOut {
   id: string
@@ -65,9 +66,7 @@ export function OptOutTable() {
 
   const fetchOptOuts = async () => {
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/v1/governance/opt-outs`)
-      if (!res.ok) throw new Error('Failed to fetch')
-      const data = await res.json()
+      const data = await getOptOuts()
       setOptOuts(data || [])
     } catch {
       toast.error('Failed to load opt-outs')
@@ -78,10 +77,7 @@ export function OptOutTable() {
 
   const handleDelete = async (id: string) => {
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/v1/governance/opt-outs/${id}`, {
-        method: 'DELETE',
-      })
-      if (!res.ok) throw new Error('Delete failed')
+      await deleteOptOut(id)
       setOptOuts(optOuts.filter(o => o.id !== id))
       toast.success('Opt-out removed')
     } catch {
@@ -94,7 +90,6 @@ export function OptOutTable() {
       toast.error('User ID is required')
       return
     }
-    // Basic UUID format check
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
     if (!uuidRegex.test(form.user_id.trim())) {
       toast.error('User ID must be a valid UUID')
@@ -102,21 +97,12 @@ export function OptOutTable() {
     }
     setSubmitting(true)
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/v1/governance/opt-outs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: form.user_id.trim(),
-          channel: form.channel,
-          reason: form.reason.trim() || undefined,
-          source: form.source,
-        }),
+      const created = await createOptOut({
+        user_id: form.user_id.trim(),
+        channel: form.channel,
+        reason: form.reason.trim() || undefined,
+        source: form.source,
       })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || 'Failed to add opt-out')
-      }
-      const created = await res.json()
       setOptOuts([created, ...optOuts])
       setDialogOpen(false)
       setForm({ user_id: '', channel: 'email', reason: '', source: 'manual' })

@@ -17,6 +17,7 @@ type SendGridSender struct {
 	apiKey    string
 	fromEmail string
 	fromName  string
+	replyTo   string
 }
 
 func NewSendGridSender(cfg config.SendGridConfig) *SendGridSender {
@@ -27,6 +28,7 @@ func NewSendGridSender(cfg config.SendGridConfig) *SendGridSender {
 		apiKey:    strings.TrimSpace(cfg.APIKey),
 		fromEmail: strings.TrimSpace(cfg.FromEmail),
 		fromName:  strings.TrimSpace(cfg.FromName),
+		replyTo:   strings.TrimSpace(cfg.ReplyTo),
 	}
 }
 
@@ -73,6 +75,9 @@ func (s *SendGridSender) Send(ctx context.Context, n *domain.Notification) (doma
 		m = mail.NewV3MailInit(from, subject, to, mail.NewContent("text/html", htmlBody))
 	} else {
 		m = mail.NewV3MailInit(from, subject, to, mail.NewContent("text/plain", textBody))
+	}
+	if s.replyTo != "" {
+		m.SetReplyTo(mail.NewEmail("", s.replyTo))
 	}
 	// Embed notification ID in custom args so it appears in webhook event payloads
 	if len(m.Personalizations) > 0 {
@@ -123,4 +128,3 @@ func (s *SendGridSender) GetStatus(_ context.Context, providerMsgID string) (dom
 		ErrorMessage:  "sendgrid does not support status polling; configure webhook delivery events",
 	}, nil
 }
-

@@ -25,6 +25,7 @@ type WebhookWorker struct {
 
 func NewWebhookWorker(
 	subscriber pubsub.Subscriber,
+	publisher pubsub.Publisher,
 	senders []provider.Sender,
 	notifRepo *repository.NotificationRepository,
 	attemptRepo *repository.AttemptRepository,
@@ -44,7 +45,7 @@ func NewWebhookWorker(
 	return &WebhookWorker{
 		base: newBaseWorker(
 			domain.ChannelWebhook, subKey,
-			subscriber, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
+			subscriber, publisher, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
 		),
 		senders: senders,
 	}

@@ -19,6 +19,7 @@ import (
 type MailgunSender struct {
 	mg         *mailgun.MailgunImpl
 	from       string
+	replyTo    string
 	domain     string
 	apiKey     string
 	httpClient *http.Client
@@ -29,6 +30,7 @@ func NewMailgunSender(cfg config.MailgunConfig) *MailgunSender {
 	return &MailgunSender{
 		mg:         mg,
 		from:       cfg.From,
+		replyTo:    cfg.ReplyTo,
 		domain:     cfg.Domain,
 		apiKey:     cfg.APIKey,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
@@ -37,7 +39,7 @@ func NewMailgunSender(cfg config.MailgunConfig) *MailgunSender {
 
 func (s *MailgunSender) ProviderName() string { return "mailgun" }
 
-func (s *MailgunSender) ValidateEmail(_ string) error { return nil }
+func (s *MailgunSender) ValidateEmail(email string) error { return validateEmailFormat(email) }
 
 func (s *MailgunSender) Send(ctx context.Context, n *domain.Notification) (domain.DeliveryResult, error) {
 	start := time.Now()
@@ -49,6 +51,9 @@ func (s *MailgunSender) Send(ctx context.Context, n *domain.Notification) (domai
 	message := s.mg.NewMessage(s.from, n.RenderedContent.Subject, n.RenderedContent.Body, n.Recipient)
 	if n.RenderedContent.HTML != "" {
 		message.SetHtml(n.RenderedContent.HTML)
+	}
+	if s.replyTo != "" {
+		message.AddHeader("Reply-To", s.replyTo)
 	}
 	// Embed notification ID so it comes back in webhook event-data.user-variables
 	_ = message.AddVariable("notification_id", n.ID.String())
@@ -118,7 +123,9 @@ func (s *MailgunSender) GetStatus(ctx context.Context, providerMsgID string) (do
 			return nil, resp.StatusCode, body, fmt.Errorf("mailgun events API returned HTTP %d", resp.StatusCode)
 		}
 
-		var result struct{ Items []mailgunEventItem `json:"items"` }
+		var result struct {
+			Items []mailgunEventItem `json:"items"`
+		}
 		if err := json.Unmarshal(body, &result); err != nil {
 			return nil, resp.StatusCode, body, err
 		}

@@ -2,7 +2,9 @@
 
 import { useState, useEffect } from 'react'
 import { Calendar, Clock, Loader2, Plus, Send, User } from 'lucide-react'
+import { effectiveRole } from '@/lib/role'
 import { Button } from '@/components/ui/button'
+import { useMaybeUser } from '@/components/auth/maybe-clerk'
 import {
   Dialog,
   DialogContent,
@@ -33,6 +35,10 @@ export function ScheduleNotificationDialog() {
   const [loading, setLoading] = useState(false)
   const [vendors, setVendors] = useState<VendorConfig[]>([])
   const [clients, setClients] = useState<ApiClientKey[]>([])
+  
+  const { user: clerkUser } = useMaybeUser()
+  const role = effectiveRole({ clerkUser, fallback: 'support' })
+  const isAdmin = role === 'admin'
 
   const [form, setForm] = useState({
     channel: 'email' as Channel,
@@ -64,7 +70,7 @@ export function ScheduleNotificationDialog() {
         body: form.body,
         scheduled_at: form.scheduled_at ? new Date(form.scheduled_at).toISOString() : undefined,
         forced_vendor: form.vendor === EMPTY ? undefined : form.vendor,
-        client_id: form.client_id === EMPTY ? undefined : form.client_id,
+        client_id: isAdmin && form.client_id !== EMPTY ? form.client_id : undefined,
         idempotency_key: crypto.randomUUID(),
       })
       toast.success(isScheduled ? 'Notification scheduled' : 'Notification sent')
@@ -200,8 +206,8 @@ export function ScheduleNotificationDialog() {
               <p className="text-[10px] text-muted-foreground">Leave empty to send immediately.</p>
             </div>
 
-            {/* Client selector — only relevant when scheduling */}
-            {isScheduled && (
+            {/* Client selector — only relevant when scheduling and for admin users */}
+            {isScheduled && isAdmin && (
               <div className="space-y-2">
                 <Label htmlFor="client_id" className="flex items-center gap-1.5">
                   <User className="h-3.5 w-3.5 text-muted-foreground" />

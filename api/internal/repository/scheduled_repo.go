@@ -67,8 +67,8 @@ func (r *ScheduledRepository) UpdateStatus(ctx context.Context, notifID uuid.UUI
 	return err
 }
 
-// List returns scheduled notifications with optional status filter and pagination.
-func (r *ScheduledRepository) List(ctx context.Context, statuses []domain.NotificationStatus, page, pageSize int) ([]*domain.ScheduledNotification, int64, error) {
+// List returns scheduled notifications with optional status and api_key_id filters and pagination.
+func (r *ScheduledRepository) List(ctx context.Context, statuses []domain.NotificationStatus, page, pageSize int, apiKeyID *uuid.UUID) ([]*domain.ScheduledNotification, int64, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -83,6 +83,12 @@ func (r *ScheduledRepository) List(ctx context.Context, statuses []domain.Notifi
 	if len(statuses) > 0 {
 		where += fmt.Sprintf(" AND status = ANY($%d)", idx)
 		args = append(args, statuses)
+		idx++
+	}
+
+	if apiKeyID != nil {
+		where += fmt.Sprintf(" AND api_key_id = $%d", idx)
+		args = append(args, *apiKeyID)
 		idx++
 	}
 

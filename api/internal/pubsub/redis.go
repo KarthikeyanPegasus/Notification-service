@@ -41,6 +41,29 @@ func (p *RedisPublisher) Publish(ctx context.Context, channel string, msg *Messa
 	return fmt.Sprintf("redis:%s", topic), nil
 }
 
+func (p *RedisPublisher) PublishToDLQ(ctx context.Context, msg *Message, reason string) (string, error) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return "", fmt.Errorf("marshalling dlq message: %w", err)
+	}
+
+	topic := DLQTopic
+	err = p.client.Publish(ctx, topic, data).Err()
+	if err != nil {
+		return "", fmt.Errorf("redis publish to DLQ %s: %w", topic, err)
+	}
+
+	if p.log != nil {
+		p.log.Info("redis DLQ message published",
+			zap.String("notification_id", msg.NotificationID),
+			zap.String("reason", reason),
+			zap.String("topic", topic),
+		)
+	}
+
+	return fmt.Sprintf("redis:%s", topic), nil
+}
+
 func (p *RedisPublisher) Close() error {
 	return nil // connection managed externally
 }

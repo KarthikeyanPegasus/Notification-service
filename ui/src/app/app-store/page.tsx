@@ -153,6 +153,14 @@ export default function AppStorePage() {
                 onChange={(e) => updateField('from', e.target.value)}
               />
             </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Reply-To (Optional)</label>
+              <Input
+                placeholder="support@yourdomain.com"
+                value={formData.reply_to || ''}
+                onChange={(e) => updateField('reply_to', e.target.value)}
+              />
+            </div>
           </div>
         )
       case 'ses':
@@ -274,6 +282,14 @@ export default function AppStorePage() {
                 />
               </div>
             </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Reply-To (Optional)</label>
+              <Input
+                placeholder="support@yourdomain.com"
+                value={formData.reply_to || ''}
+                onChange={e => updateField('reply_to', e.target.value)}
+              />
+            </div>
           </div>
         )
       case 'twilio':
@@ -364,6 +380,14 @@ export default function AppStorePage() {
                 onChange={e => updateField('from_name', e.target.value)}
               />
             </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Reply-To (Optional)</label>
+              <Input
+                placeholder="support@yourdomain.com"
+                value={formData.reply_to || ''}
+                onChange={e => updateField('reply_to', e.target.value)}
+              />
+            </div>
           </div>
         )
       case 'postmark':
@@ -392,6 +416,14 @@ export default function AppStorePage() {
                 placeholder="NotifyHub"
                 value={formData.from_name || ''}
                 onChange={e => updateField('from_name', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Reply-To (Optional)</label>
+              <Input
+                placeholder="support@yourdomain.com"
+                value={formData.reply_to || ''}
+                onChange={e => updateField('reply_to', e.target.value)}
               />
             </div>
           </div>

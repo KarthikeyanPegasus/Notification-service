@@ -13,8 +13,25 @@ import (
 	"github.com/spidey/notification-service/internal/pubsub"
 	"github.com/spidey/notification-service/internal/ratelimit"
 	"github.com/spidey/notification-service/internal/repository"
+	"github.com/spidey/notification-service/internal/security"
 	"go.uber.org/zap"
 )
+
+// MaxRetryAttempts defines the maximum number of delivery attempts before sending to DLQ.
+const MaxRetryAttempts = 5
+
+// exponentialBackoff calculates delay with exponential backoff and jitter.
+func exponentialBackoff(attempt int) time.Duration {
+	// Base delay: 100ms, 200ms, 400ms, 800ms, 1600ms
+	baseDelay := time.Duration(100) * time.Millisecond
+	backoff := baseDelay * time.Duration(1<<uint(attempt-1))
+	if backoff > 30*time.Second {
+		backoff = 30 * time.Second
+	}
+	// Add jitter (±20%)
+	jitter := time.Duration(float64(backoff) * 0.2 * (2*0.5 - 1))
+	return backoff + jitter
+}
 
 // suppressionCheckTimeout is the max time for a governance DB lookup per message.
 const suppressionCheckTimeout = 5 * time.Second
@@ -63,6 +80,7 @@ type BaseWorker struct {
 	priority     domain.Priority // the priority this worker instance handles
 	subscription string
 	subscriber   pubsub.Subscriber
+	publisher    pubsub.Publisher // for publishing to DLQ
 	notifRepo    *repository.NotificationRepository
 	attemptRepo  *repository.AttemptRepository
 	eventRepo    *repository.EventRepository
@@ -105,6 +123,7 @@ func newBaseWorker(
 	channel domain.Channel,
 	subscription string,
 	subscriber pubsub.Subscriber,
+	publisher pubsub.Publisher,
 	notifRepo *repository.NotificationRepository,
 	attemptRepo *repository.AttemptRepository,
 	eventRepo *repository.EventRepository,
@@ -119,6 +138,7 @@ func newBaseWorker(
 		channel:      channel,
 		subscription: subscription,
 		subscriber:   subscriber,
+		publisher:    publisher,
 		notifRepo:    notifRepo,
 		attemptRepo:  attemptRepo,
 		eventRepo:    eventRepo,
@@ -207,7 +227,7 @@ func (w *BaseWorker) checkGovernance(ctx context.Context, n *domain.Notification
 			w.log.Info("notification suppressed (identifier)",
 				zap.String("notification_id", n.ID.String()),
 				zap.String("channel", string(w.channel)),
-				zap.String("recipient", n.Recipient),
+				zap.String("recipient", security.RedactRecipient(n.Recipient, w.channel)),
 			)
 			_ = w.notifRepo.UpdateStatus(ctx, n.ID, domain.StatusSuppressed)
 			_ = w.eventRepo.Append(ctx, &domain.NotificationEvent{
@@ -260,7 +280,7 @@ func (w *BaseWorker) getEffectiveConfig(ctx context.Context, apiKeyID *uuid.UUID
 	return &cfgCopy
 }
 
-// dispatch executes the send using a provider, records the attempt, and acks/nacks.
+// dispatch executes the send using a provider, records the attempt, and handles retries/DLQ.
 func (w *BaseWorker) dispatch(
 	ctx context.Context,
 	msg *pubsub.Message,
@@ -282,6 +302,43 @@ func (w *BaseWorker) dispatch(
 	// Governance check: suppress before delivery (non-Temporal path)
 	if w.checkGovernance(ctx, n) {
 		return nil // ack — suppressed notifications should not be retried
+	}
+
+	// Get current attempt count from message (defaults to 0 for first attempt)
+	attemptNum := msg.AttemptCount + 1
+	if attemptNum > MaxRetryAttempts {
+		w.log.Warn("max retry attempts exceeded, sending to DLQ",
+			zap.String("notification_id", notifID.String()),
+			zap.Int("attempt_count", attemptNum),
+		)
+		// Send to DLQ
+		if w.publisher != nil {
+			msg.AttemptCount = attemptNum
+			_, dlqErr := w.publisher.PublishToDLQ(ctx, msg, "max_retries_exceeded")
+			if dlqErr != nil {
+				w.log.Error("failed to send to DLQ", zap.Error(dlqErr))
+			}
+		}
+		return nil // ack to prevent infinite loop
+	}
+
+	// Apply exponential backoff for retries (skip for first attempt)
+	if attemptNum > 1 {
+		delay := exponentialBackoff(attemptNum)
+		w.log.Info("applying exponential backoff before retry",
+			zap.String("notification_id", notifID.String()),
+			zap.Int("attempt", attemptNum),
+			zap.Duration("delay", delay),
+		)
+		select {
+		case <-time.After(delay):
+			// Continue with retry
+		case <-ctx.Done():
+			w.log.Warn("context cancelled during backoff",
+				zap.String("notification_id", notifID.String()),
+			)
+			return ctx.Err()
+		}
 	}
 
 	// Enforce priority SLA: wrap context with a deadline based on priority.
@@ -306,7 +363,6 @@ func (w *BaseWorker) dispatch(
 	ctx = slaCtx // use SLA-bounded context for the actual send
 
 	// Attempt the send
-	attemptNum := 1
 	start := time.Now()
 	var result domain.DeliveryResult
 
@@ -327,7 +383,7 @@ func (w *BaseWorker) dispatch(
 		result.ErrorMessage = execErr.Error()
 	}
 
-	// Record the attempt
+	// Record the attempt with actual attempt number
 	if err := w.attemptRepo.RecordAttemptFromResult(ctx, notifID, attemptNum, result); err != nil {
 		w.log.Error("recording attempt", zap.Error(err))
 	}
@@ -348,6 +404,7 @@ func (w *BaseWorker) dispatch(
 		Metadata: map[string]any{
 			"provider":   vendorName,
 			"latency_ms": result.LatencyMs,
+			"attempt":    attemptNum,
 		},
 		CreatedAt: time.Now(),
 	})
@@ -358,6 +415,7 @@ func (w *BaseWorker) dispatch(
 		zap.String("vendor", vendorName),
 		zap.Bool("success", result.Success),
 		zap.Int("latency_ms", result.LatencyMs),
+		zap.Int("attempt", attemptNum),
 	)
 
 	return execErr
@@ -387,7 +445,42 @@ func (w *BaseWorker) dispatchPublishAll(
 		return nil
 	}
 
-	attemptNum := 1
+	// Get current attempt count from message
+	attemptNum := msg.AttemptCount + 1
+	if attemptNum > MaxRetryAttempts {
+		w.log.Warn("max retry attempts exceeded, sending to DLQ (publish_all)",
+			zap.String("notification_id", notifID.String()),
+			zap.Int("attempt_count", attemptNum),
+		)
+		if w.publisher != nil {
+			msg.AttemptCount = attemptNum
+			_, dlqErr := w.publisher.PublishToDLQ(ctx, msg, "max_retries_exceeded")
+			if dlqErr != nil {
+				w.log.Error("failed to send to DLQ", zap.Error(dlqErr))
+			}
+		}
+		return nil
+	}
+
+	// Apply exponential backoff for retries (skip for first attempt)
+	if attemptNum > 1 {
+		delay := exponentialBackoff(attemptNum)
+		w.log.Info("applying exponential backoff before retry (publish_all)",
+			zap.String("notification_id", notifID.String()),
+			zap.Int("attempt", attemptNum),
+			zap.Duration("delay", delay),
+		)
+		select {
+		case <-time.After(delay):
+			// Continue with retry
+		case <-ctx.Done():
+			w.log.Warn("context cancelled during backoff",
+				zap.String("notification_id", notifID.String()),
+			)
+			return ctx.Err()
+		}
+	}
+
 	anySuccess := false
 
 	for _, s := range senders {
@@ -415,7 +508,6 @@ func (w *BaseWorker) dispatchPublishAll(
 		}
 
 		_ = w.attemptRepo.RecordAttemptFromResult(ctx, notifID, attemptNum, result)
-		attemptNum++
 
 		if result.Success {
 			anySuccess = true
@@ -436,6 +528,7 @@ func (w *BaseWorker) dispatchPublishAll(
 		EventType:      eventType,
 		Metadata: map[string]any{
 			"provider": "publish_all",
+			"attempt":   attemptNum,
 		},
 		CreatedAt: time.Now(),
 	})
@@ -444,6 +537,7 @@ func (w *BaseWorker) dispatchPublishAll(
 		zap.String("channel", string(w.channel)),
 		zap.String("notification_id", notifID.String()),
 		zap.Bool("any_success", anySuccess),
+		zap.Int("attempt", attemptNum),
 	)
 
 	if anySuccess {

@@ -78,17 +78,22 @@ func (h *MeHandler) CreateClient(c *gin.Context) {
 		return
 	}
 
+	ids, err := h.users.ListAPIKeysForUser(c.Request.Context(), sub)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load assignments")
+		return
+	}
+	if len(ids) >= 1 {
+		respondError(c, http.StatusForbidden, "FORBIDDEN", "sandbox accounts are limited to 1 active client")
+		return
+	}
+
 	created, err := h.apiKeySvc.Create(c.Request.Context(), req.Name)
 	if err != nil {
 		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
 	}
 
-	ids, err := h.users.ListAPIKeysForUser(c.Request.Context(), sub)
-	if err != nil {
-		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load assignments")
-		return
-	}
 	ids = append(ids, created.Key.ID)
 	if err := h.users.SetUserAPIKeys(c.Request.Context(), sub, ids); err != nil {
 		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to assign client to user")

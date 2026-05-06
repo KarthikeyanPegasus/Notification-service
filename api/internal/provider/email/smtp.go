@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,17 +16,18 @@ import (
 
 // SMTPSender sends email via SMTP relay.
 type SMTPSender struct {
-	cfg  config.SMTPConfig
-	from string
+	cfg     config.SMTPConfig
+	from    string
+	replyTo string
 }
 
 func NewSMTPSender(cfg config.SMTPConfig) *SMTPSender {
-	return &SMTPSender{cfg: cfg, from: cfg.From}
+	return &SMTPSender{cfg: cfg, from: cfg.From, replyTo: cfg.ReplyTo}
 }
 
 func (s *SMTPSender) ProviderName() string { return "smtp-relay" }
 
-func (s *SMTPSender) ValidateEmail(_ string) error { return nil }
+func (s *SMTPSender) ValidateEmail(email string) error { return validateEmailFormat(email) }
 
 func (s *SMTPSender) Send(_ context.Context, n *domain.Notification) (domain.DeliveryResult, error) {
 	start := time.Now()
@@ -33,10 +36,29 @@ func (s *SMTPSender) Send(_ context.Context, n *domain.Notification) (domain.Del
 		return domain.DeliveryResult{}, fmt.Errorf("smtp: rendered content is nil for notification %s", n.ID)
 	}
 
+	from := strings.TrimSpace(s.from)
+	if from == "" {
+		return domain.DeliveryResult{}, fmt.Errorf("smtp: from address is empty")
+	}
+	if _, err := mail.ParseAddress(from); err != nil {
+		return domain.DeliveryResult{}, fmt.Errorf("smtp: invalid from address %q: %w", from, err)
+	}
+
+	to := strings.TrimSpace(n.Recipient)
+	if to == "" {
+		return domain.DeliveryResult{}, fmt.Errorf("smtp: recipient address is empty")
+	}
+	if _, err := mail.ParseAddress(to); err != nil {
+		return domain.DeliveryResult{}, fmt.Errorf("smtp: invalid recipient address %q: %w", to, err)
+	}
+
 	m := gomail.NewMessage()
-	m.SetHeader("From", s.from)
-	m.SetHeader("To", n.Recipient)
+	m.SetHeader("From", from)
+	m.SetHeader("To", to)
 	m.SetHeader("Subject", n.RenderedContent.Subject)
+	if s.replyTo != "" {
+		m.SetHeader("Reply-To", s.replyTo)
+	}
 	m.SetHeader("Message-ID", fmt.Sprintf("<%s@notification-service>", uuid.New().String()))
 
 	if n.RenderedContent.HTML != "" {

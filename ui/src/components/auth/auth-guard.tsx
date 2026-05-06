@@ -1,35 +1,47 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { usePathname, useRouter } from 'next/navigation'
-import { getAuthToken } from '@/lib/api'
+import { useAuth, RedirectToSignIn } from '@clerk/nextjs'
+import { usePathname } from 'next/navigation'
+import { useMemo } from 'react'
+import { useMockAuth } from './mock-clerk-provider'
 
-const PUBLIC_ROUTES = new Set<string>(['/login'])
+// When Clerk is disabled (NEXT_PUBLIC_CLERK_ENABLED=false), fall back to mock auth.
+function useMaybeAuth() {
+  const isClerkEnabled =
+    (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_CLERK_ENABLED !== 'false')
 
-export function AuthGuard({ children }: { children: React.ReactNode }) {
-  const router = useRouter()
-  const pathname = usePathname() ?? '/'
-  const [mounted, setMounted] = useState(false)
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const clerkAuth = isClerkEnabled ? useAuth() : useMockAuth()
 
-  useEffect(() => {
-    setMounted(true)
-  }, [])
-
-  useEffect(() => {
-    if (!mounted) return
-    if (PUBLIC_ROUTES.has(pathname)) return
-    const tok = getAuthToken()
-    if (!tok) {
-      router.replace('/login')
-    }
-  }, [mounted, pathname, router])
-
-  if (PUBLIC_ROUTES.has(pathname)) return <>{children}</>
-  // Avoid hydration mismatch: on the server we can't read localStorage, so we
-  // wait until the client is mounted before deciding what to render.
-  if (!mounted) return null
-  const tok = getAuthToken()
-  if (!tok) return null
-  return <>{children}</>
+  return useMemo(() => ({
+    isLoaded: clerkAuth.isLoaded,
+    isSignedIn: clerkAuth.isSignedIn,
+  }), [clerkAuth.isLoaded, clerkAuth.isSignedIn])
 }
 
+const PUBLIC_ROUTES = new Set<string>(['/login', '/sign-in', '/sign-up'])
+
+export function AuthGuard({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname() ?? '/'
+  const { isSignedIn, isLoaded } = useMaybeAuth()
+
+  // Allow public routes without auth
+  if (PUBLIC_ROUTES.has(pathname)) {
+    return <>{children}</>
+  }
+
+  // Wait for auth to load
+  if (!isLoaded) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
+      </div>
+    )
+  }
+
+  if (!isSignedIn) {
+    return <RedirectToSignIn />
+  }
+
+  return <>{children}</>
+}

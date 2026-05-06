@@ -1,0 +1,65 @@
+{{- if and .Values.kafkaInit.enabled (ne .Values.config.pubsub.mode "mock") }}
+{{- $brokers := default (include "notification-system.kafkaBrokers" .) .Values.kafkaInit.brokers }}
+{{- if $brokers }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "notification-system.fullname" . }}-kafka-init
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "notification-system.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka-init
+  annotations:
+    # Re-run this job on every helm upgrade so new topics are created.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 4
+  template:
+    metadata:
+      labels:
+        {{- include "notification-system.componentLabels" (list . "kafka-init") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: kafka-init
+          image: {{ .Values.kafkaInit.image.repository }}:{{ .Values.kafkaInit.image.tag }}
+          imagePullPolicy: {{ .Values.kafkaInit.image.pullPolicy }}
+          resources:
+            {{- toYaml .Values.kafkaInit.resources | nindent 12 }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              BROKERS="{{ $brokers }}"
+              PARTITIONS="{{ .Values.config.pubsub.kafkaNumPartitions }}"
+              REPLICATION="{{ .Values.config.pubsub.kafkaReplicationFactor }}"
+
+              create_topic() {
+                local topic="$1"
+                echo "Creating topic: $topic"
+                kafka-topics.sh \
+                  --bootstrap-server "$BROKERS" \
+                  --create \
+                  --if-not-exists \
+                  --topic "$topic" \
+                  --partitions "$PARTITIONS" \
+                  --replication-factor "$REPLICATION"
+              }
+
+              # Priority notification topics (channel × priority)
+              for channel in email sms push webhook slack websocket; do
+                for priority in high medium low; do
+                  create_topic "notifications-${channel}-${priority}"
+                done
+              done
+
+              # Internal topics
+              create_topic "internal-config-reload"
+              create_topic "notifications-dlq"
+
+              echo "All Kafka topics created successfully."
+{{- end }}
+{{- end }}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -69,7 +70,7 @@ type SendResponse struct {
 }
 
 // Send validates and enqueues a notification for delivery.
-func (s *NotificationService) Send(ctx context.Context, req *domain.SendRequest, source string, apiKeyID *uuid.UUID) (*SendResponse, error) {
+func (s *NotificationService) Send(ctx context.Context, req *domain.SendRequest, source string, apiKeyID *uuid.UUID, traceID string) (*SendResponse, error) {
 	// Resolve idempotency: return existing if key already used
 	existing, err := s.notifRepo.GetByIdempotencyKey(ctx, req.IdempotencyKey)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
@@ -86,27 +87,43 @@ func (s *NotificationService) Send(ctx context.Context, req *domain.SendRequest,
 	// Notifications are accepted purely based on API key auth and request validity.
 	var userID *uuid.UUID = nil
 
-	// Check preferences for first channel (multi-channel sends dispatch per-channel)
-	prefs, err := s.prefsSvc.Get(ctx, req.UserID)
-	if err != nil {
-		return nil, fmt.Errorf("getting user preferences: %w", err)
+	// Parallelize multi-channel dispatch using goroutines and WaitGroup
+	var wg sync.WaitGroup
+	var resultsMu sync.Mutex
+	var results []*SendResponse
+	var firstErr error
+
+	for _, ch := range req.Channels {
+		wg.Add(1)
+		go func(channel domain.Channel) {
+			defer wg.Done()
+			resp, err := s.sendToChannel(ctx, req, userID, channel, source, apiKeyID, traceID)
+			if err != nil {
+				s.log.Warn("failed to enqueue for channel",
+					zap.String("channel", string(channel)),
+					zap.String("user_id", req.UserID),
+					zap.Error(err),
+				)
+				resultsMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				resultsMu.Unlock()
+				return
+			}
+			resultsMu.Lock()
+			results = append(results, resp)
+			resultsMu.Unlock()
+		}(ch)
 	}
 
-	var results []*SendResponse
-	for _, ch := range req.Channels {
-		resp, err := s.sendToChannel(ctx, req, userID, ch, prefs, source, apiKeyID)
-		if err != nil {
-			s.log.Warn("failed to enqueue for channel",
-				zap.String("channel", string(ch)),
-				zap.String("user_id", req.UserID),
-				zap.Error(err),
-			)
-			continue
-		}
-		results = append(results, resp)
-	}
+	// Wait for all channel dispatches to complete
+	wg.Wait()
 
 	if len(results) == 0 {
+		if firstErr != nil {
+			return nil, fmt.Errorf("all channels failed to enqueue: %w", firstErr)
+		}
 		return nil, fmt.Errorf("all channels failed to enqueue")
 	}
 
@@ -118,29 +135,12 @@ func (s *NotificationService) sendToChannel(
 	req *domain.SendRequest,
 	userID *uuid.UUID,
 	ch domain.Channel,
-	prefs *domain.UserPreferences,
 	source string,
 	apiKeyID *uuid.UUID,
+	traceID string,
 ) (*SendResponse, error) {
-	// Check opt-in
-	if !prefs.IsChannelEnabled(ch) {
-		return nil, fmt.Errorf("%w: channel %s", domain.ErrOptedOut, ch)
-	}
-
-	// Check DND (skip for OTP and transactional)
-	if s.prefsSvc.IsInDND(prefs) && domain.PriorityFor(ch, req.Type) == domain.PriorityLow {
-		return nil, fmt.Errorf("user is in DND window; promotional deferred")
-	}
-
-	// Rate limit promotional messages
-	if domain.PriorityFor(ch, req.Type) == domain.PriorityLow {
-		limited, err := s.prefsSvc.IsRateLimited(ctx, req.UserID, ch, req.Type)
-		if err != nil {
-			s.log.Warn("rate limit check error", zap.Error(err))
-		} else if limited {
-			return nil, fmt.Errorf("%w: channel %s type %s", domain.ErrRateLimited, ch, req.Type)
-		}
-	}
+	// Note: Preference checks (opt-in, DND, rate limit) are now performed at dispatch time
+	// in the worker, not at submission time, to handle users who opt out during scheduling.
 
 	// Render template
 	var templateID *uuid.UUID
@@ -173,7 +173,11 @@ func (s *NotificationService) sendToChannel(
 		return nil, fmt.Errorf("rendering template: %w", err)
 	}
 
-	priority := domain.PriorityFor(ch, req.Type)
+	// Use caller-provided priority when set; otherwise auto-detect from notification type.
+	priority := req.Priority
+	if priority == "" {
+		priority = domain.PriorityFor(ch, req.Type)
+	}
 	now := time.Now()
 	notifID := uuid.New()
 
@@ -222,13 +226,13 @@ func (s *NotificationService) sendToChannel(
 	})
 
 	if req.ScheduledAt != nil && req.ScheduledAt.After(now) {
-		return s.handleScheduled(ctx, n, req)
+		return s.handleScheduled(ctx, n, req, traceID)
 	}
 
-	return s.publishImmediate(ctx, n)
+	return s.publishImmediate(ctx, n, traceID)
 }
 
-func (s *NotificationService) publishImmediate(ctx context.Context, n *domain.Notification) (*SendResponse, error) {
+func (s *NotificationService) publishImmediate(ctx context.Context, n *domain.Notification, traceID string) (*SendResponse, error) {
 	var apiKeyID string
 	if n.APIKeyID != nil {
 		apiKeyID = n.APIKeyID.String()
@@ -255,6 +259,10 @@ func (s *NotificationService) publishImmediate(ctx context.Context, n *domain.No
 			workflowFunc = workflow.NotificationWorkflowCadence
 		}
 
+		userID := ""
+		if n.UserID != nil {
+			userID = n.UserID.String()
+		}
 		req := &workflow.WorkflowRequest{
 			ID:             n.ID,
 			Channel:        n.Channel,
@@ -264,6 +272,8 @@ func (s *NotificationService) publishImmediate(ctx context.Context, n *domain.No
 			IdempotencyKey: n.IdempotencyKey,
 			ForcedVendor:   n.ForcedVendor,
 			ClientID:       clientID,
+			TraceID:        traceID,
+			UserID:         userID,
 		}
 		if n.TemplateID != nil {
 			tid := n.TemplateID.String()
@@ -348,7 +358,7 @@ func (s *NotificationService) publishImmediate(ctx context.Context, n *domain.No
 	}, nil
 }
 
-func (s *NotificationService) handleScheduled(ctx context.Context, n *domain.Notification, initialReq *domain.SendRequest) (*SendResponse, error) {
+func (s *NotificationService) handleScheduled(ctx context.Context, n *domain.Notification, initialReq *domain.SendRequest, traceID string) (*SendResponse, error) {
 	now := time.Now()
 	workflowID := fmt.Sprintf("sched-notif-%s", n.ID.String())
 
@@ -365,6 +375,10 @@ func (s *NotificationService) handleScheduled(ctx context.Context, n *domain.Not
 		return nil, errors.New("deliverAt is in the past")
 	}
 
+	userID := ""
+	if n.UserID != nil {
+		userID = n.UserID.String()
+	}
 	req := &workflow.WorkflowRequest{
 		ID:             n.ID,
 		Channel:        n.Channel,
@@ -373,6 +387,7 @@ func (s *NotificationService) handleScheduled(ctx context.Context, n *domain.Not
 		Type:           n.Type,
 		IdempotencyKey: n.IdempotencyKey,
 		ForcedVendor:   n.ForcedVendor,
+		UserID:         userID,
 	}
 	if n.TemplateID != nil {
 		tid := n.TemplateID.String()
@@ -386,16 +401,12 @@ func (s *NotificationService) handleScheduled(ctx context.Context, n *domain.Not
 		}
 	}
 
-	// Resolve the workflow engine: prefer explicit client_id from the request,
-	// then fall back to the API key that authenticated this call.
+	// Resolve the workflow engine scope from the notification's API key ID.
+	// The client_id from request body is NOT used for scoping (prevents cross-tenant dispatch).
+	// The handler middleware ensures only authorized client_id values are accepted.
 	scopeID := ""
 	var schedAPIKeyID *uuid.UUID
-	if initialReq.ClientID != nil && *initialReq.ClientID != "" {
-		scopeID = *initialReq.ClientID
-		if parsed, err := uuid.Parse(scopeID); err == nil {
-			schedAPIKeyID = &parsed
-		}
-	} else if n.APIKeyID != nil {
+	if n.APIKeyID != nil {
 		scopeID = n.APIKeyID.String()
 		schedAPIKeyID = n.APIKeyID
 	}
@@ -439,23 +450,10 @@ func (s *NotificationService) handleScheduled(ctx context.Context, n *domain.Not
 		if err := s.schedRepo.Create(ctx, sched); err != nil {
 			return nil, fmt.Errorf("persisting scheduled notification: %w", err)
 		}
-		delay := time.Until(*initialReq.ScheduledAt)
-		nCopy := *n
-		go func() {
-			time.Sleep(delay)
-			if _, pubErr := s.publishImmediate(context.Background(), &nCopy); pubErr != nil {
-				s.log.Error("standalone scheduled delivery failed",
-					zap.String("notification_id", nCopy.ID.String()),
-					zap.Error(pubErr),
-				)
-				_ = s.schedRepo.UpdateStatus(context.Background(), nCopy.ID, domain.StatusFailed)
-				return
-			}
-			_ = s.schedRepo.UpdateStatus(context.Background(), nCopy.ID, domain.StatusSent)
-		}()
+		// The DB record is persisted; StartStandaloneScheduler will pick it up on its next poll.
 		s.log.Info(logMsg,
 			zap.String("notification_id", n.ID.String()),
-			zap.Duration("delay", delay),
+			zap.Time("scheduled_at", *initialReq.ScheduledAt),
 		)
 		return &SendResponse{
 			NotificationID: n.ID.String(),
@@ -899,6 +897,10 @@ func (s *NotificationService) Retrigger(ctx context.Context, id uuid.UUID) error
 			WorkflowIDReusePolicy: workflow.IDReusePolicyAllowDuplicate,
 		}
 
+		userID := ""
+		if n.UserID != nil {
+			userID = n.UserID.String()
+		}
 		req := &workflow.WorkflowRequest{
 			ID:             n.ID,
 			Channel:        n.Channel,
@@ -908,6 +910,7 @@ func (s *NotificationService) Retrigger(ctx context.Context, id uuid.UUID) error
 			IdempotencyKey: n.IdempotencyKey,
 			ForcedVendor:   n.ForcedVendor,
 			ClientID:       clientID,
+			UserID:         userID,
 		}
 		if n.TemplateID != nil {
 			tid := n.TemplateID.String()
@@ -972,7 +975,10 @@ func (s *NotificationService) Retrigger(ctx context.Context, id uuid.UUID) error
 		msg.Payload = n.RenderedContent.Data
 	}
 
-	if _, err := s.publisher.Publish(ctx, string(n.Channel), msg); err != nil {
+	// Route to the priority-specific topic (same as publishImmediate) so workers
+	// on the correct priority consumer group pick up the retriggered message.
+	topicKey := pubsub.PriorityTopicKey(string(n.Channel), string(n.Priority))
+	if _, err := s.publisher.Publish(ctx, topicKey, msg); err != nil {
 		return fmt.Errorf("retrigger publish failed: %w", err)
 	}
 
@@ -995,4 +1001,66 @@ func (s *NotificationService) Retrigger(ctx context.Context, id uuid.UUID) error
 		return fmt.Errorf("retrigger: failed to update status: %w", err)
 	}
 	return nil
+}
+
+// StartStandaloneScheduler polls the DB every 30 seconds for pending standalone-scheduled
+// notifications that are now due and dispatches them. It must be called in a goroutine
+// and exits when ctx is cancelled. This replaces the in-memory sleep goroutine so that
+// scheduled notifications survive service restarts.
+func (s *NotificationService) StartStandaloneScheduler(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	dispatch := func() {
+		pollCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+		defer cancel()
+
+		items, _, err := s.schedRepo.List(pollCtx, []domain.NotificationStatus{domain.StatusPending}, 1, 500, nil)
+		if err != nil {
+			s.log.Warn("standalone scheduler: list pending failed", zap.Error(err))
+			return
+		}
+
+		now := time.Now()
+		for _, sched := range items {
+			if sched.ScheduledAt.After(now) {
+				continue
+			}
+			notifID := sched.NotificationID
+			n, err := s.notifRepo.GetByID(pollCtx, notifID)
+			if err != nil || n == nil {
+				s.log.Warn("standalone scheduler: notification not found",
+					zap.String("notification_id", notifID.String()),
+					zap.Error(err),
+				)
+				continue
+			}
+
+			go func(n *domain.Notification, pollCtx context.Context) {
+				deliveryCtx, cancel := context.WithTimeout(pollCtx, 15*time.Second)
+				defer cancel()
+				if _, pubErr := s.publishImmediate(deliveryCtx, n, ""); pubErr != nil {
+					s.log.Error("standalone scheduler: delivery failed",
+						zap.String("notification_id", n.ID.String()),
+						zap.Error(pubErr),
+					)
+					_ = s.schedRepo.UpdateStatus(context.Background(), n.ID, domain.StatusFailed)
+					return
+				}
+				_ = s.schedRepo.UpdateStatus(context.Background(), n.ID, domain.StatusSent)
+			}(n, pollCtx)
+		}
+	}
+
+	// Run once immediately on startup to pick up any notifications that were due during downtime.
+	dispatch()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			dispatch()
+		}
+	}
 }

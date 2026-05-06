@@ -1,4 +1,4 @@
-{{- if .Values.ingress.enabled }}
+{{- if .Values.ingress.enabled -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -16,13 +16,7 @@ spec:
   {{- end }}
   {{- if .Values.ingress.tls }}
   tls:
-    {{- range .Values.ingress.tls }}
-    - hosts:
-        {{- range .hosts }}
-        - {{ . | quote }}
-        {{- end }}
-      secretName: {{ .secretName }}
-    {{- end }}
+    {{- toYaml .Values.ingress.tls | nindent 4 }}
   {{- end }}
   rules:
     {{- range .Values.ingress.hosts }}
@@ -34,9 +28,19 @@ spec:
             pathType: {{ .pathType }}
             backend:
               service:
-                name: {{ include "notification-system.fullname" $ }}-{{ .service }}
+                {{- if eq .service "api" }}
+                name: {{ include "notification-system.fullname" $ }}-api
                 port:
-                  name: http
+                  number: {{ $.Values.api.service.port }}
+                {{- else if eq .service "worker" }}
+                name: {{ include "notification-system.fullname" $ }}-worker
+                port:
+                  number: {{ $.Values.worker.service.port }}
+                {{- else }}
+                name: {{ include "notification-system.fullname" $ }}-ui
+                port:
+                  number: {{ $.Values.ui.service.port }}
+                {{- end }}
           {{- end }}
     {{- end }}
 {{- end }}

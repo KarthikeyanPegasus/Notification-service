@@ -1,10 +1,40 @@
 package domain
 
 import (
+	"fmt"
+	"net/mail"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+var e164Re = regexp.MustCompile(`^\+[1-9]\d{6,14}$`)
+
+// ValidateRecipient checks that recipient format matches the given channel.
+// Webhook: must be HTTPS URL. Email: must be RFC 5322 address. SMS: must be E.164.
+func ValidateRecipient(channel Channel, recipient string) error {
+	r := strings.TrimSpace(recipient)
+	if r == "" {
+		return nil // optional; missing recipient is handled by the service
+	}
+	switch channel {
+	case ChannelEmail:
+		if _, err := mail.ParseAddress(r); err != nil {
+			return fmt.Errorf("email recipient %q is not a valid email address: %w", r, err)
+		}
+	case ChannelSMS:
+		if !e164Re.MatchString(r) {
+			return fmt.Errorf("sms recipient %q must be in E.164 format (e.g. +12125551234)", r)
+		}
+	case ChannelWebhook:
+		if !strings.HasPrefix(strings.ToLower(r), "https://") {
+			return fmt.Errorf("webhook recipient %q must be an HTTPS URL", r)
+		}
+	}
+	return nil
+}
 
 // Channel enumerates supported delivery channels.
 type Channel string
@@ -123,6 +153,7 @@ type NotificationAttempt struct {
 	ID             uuid.UUID     `json:"id" db:"id"`
 	NotificationID uuid.UUID     `json:"notification_id" db:"notification_id"`
 	AttemptNumber  int           `json:"attempt_number" db:"attempt_number"`
+	RetryCount     int           `json:"retry_count" db:"retry_count"`
 	Status         AttemptStatus `json:"status" db:"status"`
 	Provider       string        `json:"provider" db:"provider"`
 	ProviderMsgID  *string       `json:"provider_msg_id,omitempty" db:"provider_msg_id"`
@@ -245,6 +276,9 @@ type SendRequest struct {
 	// If omitted, the engine for the calling API key is used.
 	ClientID          *string           `json:"client_id,omitempty" validate:"omitempty,uuid4"`
 	Recipient         string            `json:"recipient,omitempty"`
+	// Priority overrides auto-detection from notification type.
+	// When empty, PriorityFor(channel, type) is used.
+	Priority          Priority          `json:"priority,omitempty" validate:"omitempty,oneof=high medium low"`
 	// SlackChannel targets a configured Slack channel name (resolved to a webhook URL via vendor config).
 	// If set, it overrides Recipient for the Slack channel.
 	SlackChannel      string            `json:"slack_channel,omitempty" validate:"omitempty,max=80"`
@@ -305,3 +339,4 @@ type DeliveryResult struct {
 }
 
 func (r DeliveryResult) IsSuccess() bool { return r.Success }
+

@@ -12,6 +12,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// MaxRetryAttempts defines the maximum number of delivery attempts before sending to DLQ.
+const MaxRetryAttempts = 5
+
+// DLQTopic is the topic where messages are sent after max retries.
+const DLQTopic = "notifications-dlq"
+
 // KafkaPublisher publishes notifications to Kafka priority topics.
 // Clients publish only to notifications-ingress; internal services publish to priority topics.
 type KafkaPublisher struct {
@@ -95,6 +101,40 @@ func (p *KafkaPublisher) Close() error {
 		return fmt.Errorf("closing kafka writers: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// PublishToDLQ sends a message to the dead-letter queue topic.
+func (p *KafkaPublisher) PublishToDLQ(ctx context.Context, msg *Message, reason string) (string, error) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return "", fmt.Errorf("marshalling dlq message: %w", err)
+	}
+
+	km := kafka.Message{
+		Key:   []byte(msg.NotificationID),
+		Value: data,
+		Headers: []kafka.Header{
+			{Key: "channel", Value: []byte(msg.Channel)},
+			{Key: "priority", Value: []byte(msg.Priority)},
+			{Key: "notif_id", Value: []byte(msg.NotificationID)},
+			{Key: "dlq_reason", Value: []byte(reason)},
+		},
+		Time: time.Now(),
+	}
+
+	w := p.writerFor(DLQTopic)
+	if err := w.WriteMessages(ctx, km); err != nil {
+		return "", fmt.Errorf("writing to DLQ topic %s: %w", DLQTopic, err)
+	}
+
+	p.log.Info("message sent to DLQ",
+		zap.String("topic", DLQTopic),
+		zap.String("notification_id", msg.NotificationID),
+		zap.String("reason", reason),
+		zap.Int("attempt_count", msg.AttemptCount),
+	)
+
+	return fmt.Sprintf("%s:%d", DLQTopic, time.Now().UnixNano()), nil
 }
 
 // KafkaSubscriber consumes messages from Kafka priority topics.

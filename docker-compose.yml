@@ -6,19 +6,21 @@ x-go-common: &go-common
   environment:
     NS_DATABASE_DSN: "postgres://notif:notif@postgres:5432/notifdb?sslmode=disable"
     NS_REDIS_ADDR: "redis:6379"
-    NS_PUBSUB_MODE: "mock"
+    # Default to mock unless explicitly overridden (e.g. NS_PUBSUB_MODE=kafka).
+    NS_PUBSUB_MODE: ${NS_PUBSUB_MODE:-mock}
+    NS_PUBSUB_KAFKA_BROKERS: ${NS_PUBSUB_KAFKA_BROKERS:-redpanda:29092}
     NS_LOG_FORMAT: "console"
-    NS_LOG_LEVEL: "debug"
-    NS_SERVER_MODE: "debug"
-    # Temporal runs as a separate container; never use 127.0.0.1 here.
-    NS_CADENCE_HOST_PORT: "temporal:7233"
+    NS_LOG_LEVEL: ${NS_LOG_LEVEL:-info}
+    NS_SERVER_MODE: ${NS_SERVER_MODE:-release}
+    # Guards debug mode — API fatally rejects debug in production/staging.
+    ENVIRONMENT: ${ENVIRONMENT:-development}
   depends_on:
     postgres:
       condition: service_healthy
     redis:
       condition: service_healthy
-    temporal:
-      condition: service_started
+    redpanda:
+      condition: service_healthy
   volumes:
     - ./api/config:/config:ro
     - ./api/migrations:/migrations:ro
@@ -54,13 +56,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-
-  mailhog:
-    image: mailhog/mailhog:latest
-    restart: unless-stopped
-    ports:
-      - "1025:1025"   # SMTP
-      - "8025:8025"   # Web UI
 
   redpanda:
     image: redpandadata/redpanda:latest
@@ -102,32 +97,51 @@ services:
       redpanda:
         condition: service_healthy
 
-  temporal:
-    image: temporalio/auto-setup:1.24.2
-    restart: unless-stopped
-    ports:
-      - "7233:7233"
-    environment:
-      - DB=postgres12
-      - DB_PORT=5432
-      - SQL_ADDR=postgres
-      - POSTGRES_USER=notif
-      - POSTGRES_PWD=notif
-      - POSTGRES_SEEDS=postgres
+  # Create required topics for NotifyHub priority queues.
+  # This runs once at startup and is safe to re-run (topics are created if missing).
+  redpanda-init:
+    image: redpandadata/redpanda:latest
+    restart: "no"
     depends_on:
-      postgres:
+      redpanda:
         condition: service_healthy
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        echo "Creating NotifyHub topics (if missing)..."
+        brokers="redpanda:29092"
+        rpk topic create internal-config-reload --brokers "$${brokers}" --partitions 3 --replicas 1 || true
+        rpk topic create notifications-dlq         --brokers "$${brokers}" --partitions 3 --replicas 1 || true
+        rpk topic create notifications-email-high   --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-email-medium --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-email-low    --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-sms-high     --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-sms-medium   --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-sms-low      --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-push-high    --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-push-medium  --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-push-low     --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-webhook-high   --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-webhook-medium --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-webhook-low    --brokers "$${brokers}" --partitions 6 --replicas 1 || true
+        rpk topic create notifications-slack-high   --brokers "$${brokers}" --partitions 3 --replicas 1 || true
+        rpk topic create notifications-slack-medium --brokers "$${brokers}" --partitions 3 --replicas 1 || true
+        rpk topic create notifications-slack-low    --brokers "$${brokers}" --partitions 3 --replicas 1 || true
+        rpk topic create notifications-websocket-high   --brokers "$${brokers}" --partitions 3 --replicas 1 || true
+        rpk topic create notifications-websocket-medium --brokers "$${brokers}" --partitions 3 --replicas 1 || true
+        rpk topic create notifications-websocket-low    --brokers "$${brokers}" --partitions 3 --replicas 1 || true
+        echo "Topic init done."
 
-  temporal-ui:
-    image: temporalio/ui:latest
+  # ── SpamAssassin ────────────────────────────────────────────────────────────
+  # Content filter for email spam detection. The API degrades gracefully if this
+  # service is unreachable (warns and skips the check).
+  spamassassin:
+    image: ghcr.io/mailserver2/spamassassin:latest
     restart: unless-stopped
     ports:
-      - "8082:8080"
-    environment:
-      - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
-    depends_on:
-      - temporal
+      - "127.0.0.1:783:783"
 
   # ── Application ─────────────────────────────────────────────────────────────
   api:
@@ -140,19 +154,19 @@ services:
     ports:
       - "8080:8080"
     environment:
-      NS_DATABASE_DSN: "postgres://notif:notif@postgres:5432/notifdb?sslmode=disable"
+      NS_DATABASE_DSN: ${NS_DATABASE_DSN:-postgres://notif:notif@postgres:5432/notifdb?sslmode=disable}
       NS_REDIS_ADDR: "redis:6379"
-      # Switch to "kafka" to enable Kafka-backed priority queuing.
-      NS_PUBSUB_MODE: "mock"
+      NS_PUBSUB_MODE: "kafka"
       NS_PUBSUB_KAFKA_BROKERS: "redpanda:29092"
-      NS_CADENCE_HOST_PORT: "temporal:7233"
       NS_LOG_FORMAT: "console"
-      NS_LOG_LEVEL: "debug"
-      NS_SERVER_MODE: "debug"
-      NS_PROVIDERS_EMAIL_SMTP_HOST: "mailhog"
-      NS_PROVIDERS_EMAIL_SMTP_PORT: "1025"
-      NS_JWT_SECRET: "change-me-in-production"
+      NS_LOG_LEVEL: ${NS_LOG_LEVEL:-info}
+      NS_SERVER_MODE: ${NS_SERVER_MODE:-release}
+      NS_JWT_SECRET: ${NS_JWT_SECRET:-}
+      NS_JWT_SERVICE_SECRET: ${NS_JWT_SERVICE_SECRET:-}
+      NS_CLERK_SECRET_KEY: ${NS_CLERK_SECRET_KEY:-}
+      NS_CLERK_WEBHOOK_SECRET: ${NS_CLERK_WEBHOOK_SECRET:-}
       NS_WORKER_INTERNAL_URL: "http://worker:8081"
+      ENVIRONMENT: ${ENVIRONMENT:-development}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
       interval: 10s
@@ -170,16 +184,13 @@ services:
     ports:
       - "8081:8081"
     environment:
-      NS_DATABASE_DSN: "postgres://notif:notif@postgres:5432/notifdb?sslmode=disable"
+      NS_DATABASE_DSN: ${NS_DATABASE_DSN:-postgres://notif:notif@postgres:5432/notifdb?sslmode=disable}
       NS_REDIS_ADDR: "redis:6379"
-      # Switch to "kafka" to enable Kafka-backed priority queuing.
-      NS_PUBSUB_MODE: "mock"
+      NS_PUBSUB_MODE: "kafka"
       NS_PUBSUB_KAFKA_BROKERS: "redpanda:29092"
-      NS_CADENCE_HOST_PORT: "temporal:7233"
       NS_LOG_FORMAT: "console"
-      NS_LOG_LEVEL: "debug"
-      NS_PROVIDERS_EMAIL_SMTP_HOST: "mailhog"
-      NS_PROVIDERS_EMAIL_SMTP_PORT: "1025"
+      NS_LOG_LEVEL: ${NS_LOG_LEVEL:-info}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
     depends_on:
       api:
         condition: service_healthy

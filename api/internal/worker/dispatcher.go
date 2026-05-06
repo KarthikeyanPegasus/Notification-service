@@ -12,6 +12,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// EngineProvider resolves a WorkflowEngine for a given API-key scope.
+// WorkflowClientProvider from the service package satisfies this interface.
+type EngineProvider interface {
+	ClientForScope(ctx context.Context, apiKeyID *string) (wf.WorkflowEngine, error)
+}
+
 // Dispatcher reads notification messages from a single Kafka priority topic
 // and starts a Temporal/Cadence workflow on the task queue for the client that owns that message.
 //
@@ -23,10 +29,16 @@ import (
 type Dispatcher struct {
 	channel    domain.Channel
 	priority   domain.Priority
-	subscriber pubsub.Subscriber  // Kafka subscriber, one consumer group per dispatcher
-	engine     wf.WorkflowEngine
+	subscriber pubsub.Subscriber // Kafka subscriber, one consumer group per dispatcher
+	engines    EngineProvider
 	log        *zap.Logger
 }
+
+// Channel returns the channel this dispatcher handles.
+func (d *Dispatcher) Channel() domain.Channel { return d.channel }
+
+// Priority returns the priority this dispatcher handles.
+func (d *Dispatcher) Priority() domain.Priority { return d.priority }
 
 // NewDispatcher creates a Dispatcher for a specific channel × priority pair.
 // subscriber must be a dedicated Kafka subscriber whose consumer group ID is unique
@@ -35,14 +47,14 @@ func NewDispatcher(
 	channel domain.Channel,
 	priority domain.Priority,
 	subscriber pubsub.Subscriber,
-	engine wf.WorkflowEngine,
+	engines EngineProvider,
 	log *zap.Logger,
 ) *Dispatcher {
 	return &Dispatcher{
 		channel:    channel,
 		priority:   priority,
 		subscriber: subscriber,
-		engine:     engine,
+		engines:    engines,
 		log:        log.With(zap.String("channel", string(channel)), zap.String("priority", string(priority))),
 	}
 }
@@ -88,6 +100,24 @@ func (d *Dispatcher) dispatch(ctx context.Context, msg *pubsub.Message) error {
 		req.TemplateVariables = msg.Payload
 	}
 
+	// Resolve the workflow engine for this client (from their vendor config or the default).
+	engine, err := d.engines.ClientForScope(ctx, &clientID)
+	if err != nil {
+		d.log.Error("dispatcher: failed to resolve workflow engine — nacking for retry",
+			zap.String("notification_id", notifID.String()),
+			zap.String("client_id", clientID),
+			zap.Error(err),
+		)
+		return err
+	}
+	if engine == nil {
+		d.log.Warn("dispatcher: no workflow engine configured for client — acking without dispatch",
+			zap.String("notification_id", notifID.String()),
+			zap.String("client_id", clientID),
+		)
+		return nil
+	}
+
 	// Start workflow on the client-specific task queue.
 	startCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -98,11 +128,11 @@ func (d *Dispatcher) dispatch(ctx context.Context, msg *pubsub.Message) error {
 	}
 
 	var workflowFn interface{} = wf.NotificationWorkflow
-	if d.engine.ProviderName() == "cadence" {
+	if engine.ProviderName() == "cadence" {
 		workflowFn = wf.NotificationWorkflowCadence
 	}
 
-	if _, err := d.engine.ExecuteWorkflow(startCtx, opts, workflowFn, req); err != nil {
+	if _, err := engine.ExecuteWorkflow(startCtx, opts, workflowFn, req); err != nil {
 		d.log.Error("dispatcher: failed to start workflow — nacking for retry",
 			zap.String("notification_id", notifID.String()),
 			zap.String("task_queue", taskQueue),

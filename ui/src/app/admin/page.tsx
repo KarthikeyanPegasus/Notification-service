@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { PageHeader } from '@/components/shared/page-header'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -41,12 +41,27 @@ import {
   RefreshCw,
   Repeat,
   Workflow,
+  ArrowRight,
+  Loader2,
+  Info,
+  Save,
 } from 'lucide-react'
 import { getAdminOverview } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import type { AdminOverview, AdminWorkerClientSummary, KafkaTopicLag } from '@/types'
+import type { AdminOverview, AdminWorkerClientSummary, KafkaTopicLag, OrchestrationMigration } from '@/types'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function calcMigrationProgress(mig: OrchestrationMigration): number {
+  if (mig.status === 'completed') return 1
+  if (mig.old_workflow_count === 0 && mig.total_scheduled_count === 0) return 0.5
+  const wfProgress = mig.old_workflow_count > 0 ? mig.completed_old_workflows / mig.old_workflow_count : 1
+  const schedProgress = mig.total_scheduled_count > 0 ? mig.migrated_scheduled_count / mig.total_scheduled_count : 1
+  return 0.6 * wfProgress + 0.4 * schedProgress
+}
 
 function fmt(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -77,6 +92,17 @@ const CHANNEL_COLOR: Record<string, string> = {
   slack: '#4ade80',
   websocket: '#fb7185',
 }
+
+const WINDOW_OPTIONS: { value: string; label: string }[] = [
+  { value: '1h', label: 'Last 1h' },
+  { value: '3h', label: 'Last 3h' },
+  { value: '6h', label: 'Last 6h' },
+  { value: '12h', label: 'Last 12h' },
+  { value: '1d', label: 'Last 1d' },
+  { value: '1w', label: 'Last 1 week' },
+  { value: '1mo', label: 'Last 1 month' },
+  { value: '3mo', label: 'Last 3 months' },
+]
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
@@ -155,12 +181,20 @@ function SLABar({ avgMs, p95Ms, priority }: { avgMs: number; p95Ms: number; prio
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function AdminDashboardPage() {
+  const [windowKey, setWindowKey] = useState<string>('1h')
   const { data, isLoading, isError, refetch, dataUpdatedAt } = useQuery<AdminOverview>({
-    queryKey: ['admin-overview'],
-    queryFn: getAdminOverview,
-    refetchInterval: 30_000,
+    queryKey: ['admin-overview', windowKey],
+    queryFn: () => getAdminOverview(windowKey),
+    refetchInterval: 3_000,
+    staleTime: 1_000,
     retry: 1,
   })
+
+  // Track whether we've received at least one successful fetch for the "Live" badge.
+  const [hasData, setHasData] = useState(false)
+  useMemo(() => {
+    if (data && !hasData) setHasData(true)
+  }, [data, hasData])
 
   const lastUpdated = useMemo(() => {
     if (!dataUpdatedAt) return null
@@ -177,6 +211,8 @@ export default function AdminDashboardPage() {
       return b.lag - a.lag
     })
   }, [data])
+
+  const kafkaTotalEvents = data?.kafka.total_events ?? 0
 
   // ── Workers: bar chart data and per-client
   const workerByPriority = useMemo(() => {
@@ -268,30 +304,63 @@ export default function AdminDashboardPage() {
     )
   }
 
-  const { delivery, workers, kafka, top_clients, mttd_by_priority, mttd_by_vendor, cadence } = data
-  const kafkaAlert = kafka.total_lag > 2000 ? 'crit' : kafka.total_lag > 200 ? 'warn' : 'ok'
-  const failureAlert = delivery.window_1h.failure_rate > 0.05 ? 'crit' : delivery.window_1h.failure_rate > 0.02 ? 'warn' : 'ok'
+  const { delivery, workers, kafka, top_clients, mttd_by_priority, mttd_by_vendor, cadence, migrations } = data
+  const kafkaAlert =
+    kafka.enabled && kafka.total_lag > 2000 ? 'crit' : kafka.enabled && kafka.total_lag > 200 ? 'warn' : 'ok'
+  const windowLabel = delivery.window_label || 'Selected window'
+  const failureAlert = delivery.window.failure_rate > 0.05 ? 'crit' : delivery.window.failure_rate > 0.02 ? 'warn' : 'ok'
   const workerAlert = workers.total < 3 ? 'crit' : workers.total < 10 ? 'warn' : 'ok'
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
-      <PageHeader
-        title="Admin Dashboard"
-        description={lastUpdated ? `System-wide operational overview · updated ${lastUpdated}` : 'System-wide operational overview'}
-      />
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3 flex-wrap">
+          <PageHeader
+            title="Admin Dashboard"
+            description={
+              lastUpdated
+                ? `System-wide operational overview · ${windowLabel} · updated ${lastUpdated}`
+                : `System-wide operational overview · ${windowLabel}`
+            }
+          />
+          {data && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:text-emerald-300 shrink-0 self-start mt-5">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+              </span>
+              Live
+            </span>
+          )}
+        </div>
+        <div className="min-w-[180px]">
+          <Select value={windowKey} onValueChange={setWindowKey}>
+            <SelectTrigger className="h-9 text-xs bg-card/50">
+              <SelectValue placeholder="Window" />
+            </SelectTrigger>
+            <SelectContent>
+              {WINDOW_OPTIONS.map((o) => (
+                <SelectItem key={o.value} value={o.value}>
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
 
       {/* ── Row 1: Key stats ──────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <StatCard
-          label="Total (1h)"
-          value={fmt(delivery.window_1h.total)}
-          sub={`${fmt(delivery.window_1h.sent)} sent`}
+          label={`Total (${WINDOW_OPTIONS.find((w) => w.value === windowKey)?.label ?? 'window'})`}
+          value={fmt(delivery.window.total)}
+          sub={`${fmt(delivery.window.sent)} sent`}
           icon={Activity}
         />
         <StatCard
-          label="Failure Rate (1h)"
-          value={fmtPct(delivery.window_1h.failure_rate)}
-          sub={`${fmt(delivery.window_1h.failed)} failed`}
+          label={`Failure Rate (${WINDOW_OPTIONS.find((w) => w.value === windowKey)?.label ?? 'window'})`}
+          value={fmtPct(delivery.window.failure_rate)}
+          sub={`${fmt(delivery.window.failed)} failed`}
           icon={XCircle}
           alert={failureAlert}
         />
@@ -304,10 +373,10 @@ export default function AdminDashboardPage() {
         />
         <StatCard
           label="Kafka Queue Backlog"
-          value={fmt(kafka.total_lag)}
-          sub="msgs behind"
+          value={kafka.enabled ? fmt(kafka.total_lag) : '—'}
+          sub={kafka.enabled ? 'msgs behind' : `disabled (mode: ${kafka.mode || 'unknown'})`}
           icon={Radio}
-          alert={kafkaAlert}
+          alert={kafka.enabled ? kafkaAlert : 'ok'}
         />
       </div>
 
@@ -327,13 +396,13 @@ export default function AdminDashboardPage() {
                     <li>• Kafka lag is elevated ({fmt(kafka.total_lag)} msgs) — monitor and scale if it continues to grow</li>
                   )}
                   {failureAlert === 'crit' && (
-                    <li>• Failure rate {fmtPct(delivery.window_1h.failure_rate)} exceeds 5% — check vendor connectivity and rate limits in Settings</li>
+                    <li>• Failure rate {fmtPct(delivery.window.failure_rate)} exceeds 5% — check vendor connectivity and rate limits in Settings</li>
                   )}
                   {failureAlert === 'warn' && (
-                    <li>• Failure rate {fmtPct(delivery.window_1h.failure_rate)} is elevated (2–5%) — review vendor health</li>
+                    <li>• Failure rate {fmtPct(delivery.window.failure_rate)} is elevated (2–5%) — review vendor health</li>
                   )}
                   {workerAlert !== 'ok' && (
-                    <li>• Only {workers.total} Temporal workers active — WorkerManager may need restart or more API keys need to be provisioned</li>
+                    <li>• Only {workers.total} {cadence?.engine === 'standalone' ? 'dispatcher' : 'Temporal'} workers active — {cadence?.engine === 'standalone' ? 'dispatcher goroutines' : 'WorkerManager'} may need restart or more API keys need to be provisioned</li>
                   )}
                 </ul>
               </div>
@@ -348,12 +417,20 @@ export default function AdminDashboardPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Radio className="h-4 w-4 text-muted-foreground" />
-              Kafka Queue Depth by Topic
+              Kafka Topics
             </CardTitle>
-            <CardDescription>Consumer lag per priority channel. RED = &gt;100 messages.</CardDescription>
+            <CardDescription>
+              {kafka.enabled
+                ? `Consumer lag and total events per channel & priority. RED = >100 messages.${kafkaTotalEvents > 0 ? ` ${kafkaTotalEvents.toLocaleString()} events total.` : ''}`
+                : `Kafka is disabled (mode: ${kafka.mode || 'unknown'}). Enable pubsub.mode=kafka to see lag.`}
+            </CardDescription>
           </CardHeader>
           <CardContent>
-            {sortedTopics.length === 0 ? (
+            {!kafka.enabled ? (
+              <p className="text-sm text-muted-foreground py-6 text-center">
+                Kafka is disabled. Set <code className="bg-muted rounded px-1">NS_PUBSUB_MODE=kafka</code> and start a broker to enable these widgets.
+              </p>
+            ) : sortedTopics.length === 0 ? (
               <p className="text-sm text-muted-foreground py-6 text-center">
                 No Kafka data available yet.
               </p>
@@ -364,13 +441,16 @@ export default function AdminDashboardPage() {
                     <TableHead>Channel</TableHead>
                     <TableHead>Priority</TableHead>
                     <TableHead className="text-right">Lag (msgs)</TableHead>
-                    <TableHead className="w-32">Status</TableHead>
+                    <TableHead className="w-28">Status</TableHead>
+                    <TableHead className="text-right">Total Events</TableHead>
+                    <TableHead className="text-right w-20">% Share</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {sortedTopics.map((t) => {
                     const isHigh = t.lag > 100
                     const isWarn = !isHigh && t.lag > 20
+                    const pct = kafkaTotalEvents > 0 ? (t.total_events / kafkaTotalEvents) * 100 : 0
                     return (
                       <TableRow key={t.topic}>
                         <TableCell className="capitalize font-medium">{t.channel}</TableCell>
@@ -386,6 +466,12 @@ export default function AdminDashboardPage() {
                           ) : (
                             <span className="flex items-center gap-1 text-emerald-500 text-xs"><CheckCircle2 className="h-3 w-3" /> OK</span>
                           )}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums font-mono">
+                          {t.total_events.toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-muted-foreground text-xs">
+                          {pct > 0 ? `${pct.toFixed(1)}%` : '—'}
                         </TableCell>
                       </TableRow>
                     )
@@ -405,13 +491,15 @@ export default function AdminDashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">
-            {(['window_1h', 'window_24h'] as const).map((w) => {
-              const s = delivery[w]
-              const label = w === 'window_1h' ? 'Last 1 hour' : 'Last 24 hours'
+            {[
+              { key: 'window', label: windowLabel, stats: delivery.window },
+              { key: 'window_24h', label: 'Last 24 hours', stats: delivery.window_24h },
+            ].map((w) => {
+              const s = w.stats
               const rate = s.total > 0 ? ((s.total - s.failed) / s.total) * 100 : 0
               return (
-                <div key={w} className="space-y-2">
-                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">{label}</p>
+                <div key={w.key} className="space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">{w.label}</p>
                   <div className="grid grid-cols-3 gap-2 text-center">
                     <div>
                       <p className="text-lg font-semibold tabular-nums">{fmt(s.total)}</p>
@@ -448,12 +536,12 @@ export default function AdminDashboardPage() {
               <Server className="h-4 w-4 text-muted-foreground" />
               Workers by Priority
             </CardTitle>
-            <CardDescription>Live counts from worker process. At least 1 per channel × priority expected.</CardDescription>
+            <CardDescription>Live counts from worker process. At least 1 {cadence?.engine === 'standalone' ? 'dispatcher' : 'worker'} per channel × priority expected.</CardDescription>
           </CardHeader>
           <CardContent>
             {workers.total === 0 ? (
               <p className="text-sm text-muted-foreground py-6 text-center">
-                No worker data — worker process may not be running yet.
+                No {cadence?.engine === 'standalone' ? 'dispatcher' : 'worker'} data — worker process may not be running yet.
               </p>
             ) : (
               <div className="space-y-3">
@@ -461,7 +549,7 @@ export default function AdminDashboardPage() {
                   <div key={d.name} className="space-y-1">
                     <div className="flex justify-between text-sm">
                       <span className="capitalize font-medium">{d.name}</span>
-                      <span className="tabular-nums text-muted-foreground">{d.workers} workers</span>
+                      <span className="tabular-nums text-muted-foreground">{d.workers} {cadence?.engine === 'standalone' ? 'disp.' : 'workers'}</span>
                     </div>
                     <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
                       <div
@@ -474,7 +562,7 @@ export default function AdminDashboardPage() {
                     </div>
                   </div>
                 ))}
-                <p className="text-xs text-muted-foreground pt-1">{workers.total} workers total across {Object.keys(workers.by_channel).length} channels</p>
+                <p className="text-xs text-muted-foreground pt-1">{workers.total} {cadence?.engine === 'standalone' ? 'dispatchers' : 'workers'} total across {Object.keys(workers.by_channel).length} channels</p>
               </div>
             )}
           </CardContent>
@@ -616,6 +704,93 @@ export default function AdminDashboardPage() {
         </Card>
       </div>
 
+      {/* ── Row 6: Migration Preview ──────────────────────────────────────── */}
+      {migrations && migrations.dry_run_result && (
+        <Card className="border-blue-400/50 bg-blue-50/50 dark:bg-blue-950/10">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Info className="h-4 w-4 text-blue-500" />
+              Migration Preview
+              <span className="ml-auto text-xs font-normal text-muted-foreground">
+                Estimated duration: {migrations.dry_run_result.estimated_duration}
+              </span>
+            </CardTitle>
+            <CardDescription className="text-xs">
+              What would happen if you change the orchestration settings (host/port or namespace).
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="rounded-lg border bg-card p-3">
+                <p className="text-muted-foreground mb-1">Provider</p>
+                <p className="text-sm font-semibold capitalize">{migrations.dry_run_result.old_provider}</p>
+              </div>
+
+              <div className="rounded-lg border bg-card p-3">
+                <p className="text-muted-foreground mb-1">Current</p>
+                <p className="text-sm font-semibold">
+                  {migrations.dry_run_result.old_provider === 'cadence' ? migrations.dry_run_result.old_host_port : ''}
+                  {migrations.dry_run_result.old_provider === 'temporal' ? migrations.dry_run_result.old_host_port : ''}
+                  {migrations.dry_run_result.old_provider === 'cadence' && migrations.dry_run_result.old_namespace ? (
+                    <span className="block text-xs text-muted-foreground">Domain: {migrations.dry_run_result.old_namespace}</span>
+                  ) : null}
+                  {migrations.dry_run_result.old_provider === 'temporal' && migrations.dry_run_result.old_namespace ? (
+                    <span className="block text-xs text-muted-foreground">Namespace: {migrations.dry_run_result.old_namespace}</span>
+                  ) : null}
+                </p>
+              </div>
+
+              <div className="rounded-lg border bg-card p-3">
+                <p className="text-muted-foreground mb-1">Will be changed to</p>
+                <p className="text-sm font-semibold">
+                  {migrations.dry_run_result.new_provider === 'cadence' ? migrations.dry_run_result.new_host_port : ''}
+                  {migrations.dry_run_result.new_provider === 'temporal' ? migrations.dry_run_result.new_host_port : ''}
+                  {migrations.dry_run_result.new_provider === 'cadence' && migrations.dry_run_result.new_namespace ? (
+                    <span className="block text-xs text-muted-foreground">Domain: {migrations.dry_run_result.new_namespace}</span>
+                  ) : null}
+                  {migrations.dry_run_result.new_provider === 'temporal' && migrations.dry_run_result.new_namespace ? (
+                    <span className="block text-xs text-muted-foreground">Namespace: {migrations.dry_run_result.new_namespace}</span>
+                  ) : null}
+                </p>
+              </div>
+
+              <div className="rounded-lg border bg-card p-3">
+                <p className="text-muted-foreground mb-1">Scheduled to transfer</p>
+                <p className="text-sm font-semibold tabular-nums">
+                  {migrations.dry_run_result.migrated_scheduled_count}
+                  {migrations.dry_run_result.total_scheduled_count > 0 && (
+                    <span className="text-xs text-muted-foreground font-normal ml-1">
+                      / {migrations.dry_run_result.total_scheduled_count}
+                    </span>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-lg border bg-card p-3">
+              <p className="text-muted-foreground mb-1 text-xs">In-flight workflows (last 2 minutes)</p>
+              <p className="text-lg font-semibold tabular-nums">
+                {migrations.dry_run_result.old_workflow_count}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                These will complete on the current orchestration before the migration proceeds.
+              </p>
+            </div>
+
+            <div className="flex items-start gap-2 rounded-lg bg-yellow-50 dark:bg-yellow-950/20 border border-yellow-200 dark:border-yellow-900/30 p-3 text-xs">
+              <AlertTriangle className="h-4 w-4 text-yellow-600 dark:text-yellow-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-medium text-yellow-800 dark:text-yellow-200">Migration will keep old workers alive</p>
+                <p className="text-muted-foreground">
+                  Both old and new orchestration workers will run simultaneously until all in-flight workflows complete.
+                  This may temporarily increase resource usage.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* ── Row 6: Top clients ───────────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
@@ -690,7 +865,280 @@ export default function AdminDashboardPage() {
         </Card>
       </div>
 
-      {/* ── Row 7: Workflow Cadence ──────────────────────────────────────── */}
+      {/* ── Row 7: Migration Preview ──────────────────────────────────────── */}
+      {migrations && migrations.dry_run_result && (
+        <Card className="border-blue-400/50 bg-blue-50/50 dark:bg-blue-950/10">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <ArrowRight className="h-4 w-4 text-blue-500" />
+              Migration Preview
+              <span className="ml-auto text-xs font-normal text-muted-foreground">
+                Estimated duration: {migrations.dry_run_result.estimated_duration}
+              </span>
+            </CardTitle>
+            <CardDescription className="text-xs">
+              What would happen if you change the orchestration settings (host/port or namespace).
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              {/* Provider */}
+              <div className="rounded-lg border bg-card p-3">
+                <p className="text-muted-foreground mb-1">Provider</p>
+                <p className="text-sm font-semibold capitalize">{migrations.dry_run_result.old_provider}</p>
+              </div>
+
+              {/* Old Endpoint */}
+              <div className="rounded-lg border bg-card p-3">
+                <p className="text-muted-foreground mb-1">Current</p>
+                <p className="text-sm font-semibold">
+                  {migrations.dry_run_result.old_provider === 'cadence' ? migrations.dry_run_result.old_host_port : ''}
+                  {migrations.dry_run_result.old_provider === 'temporal' ? migrations.dry_run_result.old_host_port : ''}
+                  {migrations.dry_run_result.old_provider === 'cadence' && migrations.dry_run_result.old_namespace ? (
+                    <span className="block text-xs text-muted-foreground">Domain: {migrations.dry_run_result.old_namespace}</span>
+                  ) : null}
+                  {migrations.dry_run_result.old_provider === 'temporal' && migrations.dry_run_result.old_namespace ? (
+                    <span className="block text-xs text-muted-foreground">Namespace: {migrations.dry_run_result.old_namespace}</span>
+                  ) : null}
+                </p>
+              </div>
+
+              {/* New Endpoint */}
+              <div className="rounded-lg border bg-card p-3">
+                <p className="text-muted-foreground mb-1">Will be changed to</p>
+                <p className="text-sm font-semibold">
+                  {migrations.dry_run_result.new_provider === 'cadence' ? migrations.dry_run_result.new_host_port : ''}
+                  {migrations.dry_run_result.new_provider === 'temporal' ? migrations.dry_run_result.new_host_port : ''}
+                  {migrations.dry_run_result.new_provider === 'cadence' && migrations.dry_run_result.new_namespace ? (
+                    <span className="block text-xs text-muted-foreground">Domain: {migrations.dry_run_result.new_namespace}</span>
+                  ) : null}
+                  {migrations.dry_run_result.new_provider === 'temporal' && migrations.dry_run_result.new_namespace ? (
+                    <span className="block text-xs text-muted-foreground">Namespace: {migrations.dry_run_result.new_namespace}</span>
+                  ) : null}
+                </p>
+              </div>
+
+              {/* Scheduled */}
+              <div className="rounded-lg border bg-card p-3">
+                <p className="text-muted-foreground mb-1">Scheduled to transfer</p>
+                <p className="text-sm font-semibold tabular-nums">
+                  {migrations.dry_run_result.migrated_scheduled_count}
+                  {migrations.dry_run_result.total_scheduled_count > 0 && (
+                    <span className="text-xs text-muted-foreground font-normal ml-1">
+                      / {migrations.dry_run_result.total_scheduled_count}
+                    </span>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            {/* Old workflow count */}
+            <div className="rounded-lg border bg-card p-3">
+              <p className="text-muted-foreground mb-1 text-xs">In-flight workflows (last 2 minutes)</p>
+              <p className="text-lg font-semibold tabular-nums">
+                {migrations.dry_run_result.old_workflow_count}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                These will complete on the current orchestration before the migration proceeds.
+              </p>
+            </div>
+
+            {/* Warning */}
+            <div className="flex items-start gap-2 rounded-lg bg-yellow-50 dark:bg-yellow-950/20 border border-yellow-200 dark:border-yellow-900/30 p-3 text-xs">
+              <AlertTriangle className="h-4 w-4 text-yellow-600 dark:text-yellow-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-medium text-yellow-800 dark:text-yellow-200">Migration will keep old workers alive</p>
+                <p className="text-muted-foreground">
+                  Both old and new orchestration workers will run simultaneously until all in-flight workflows complete.
+                  This may temporarily increase resource usage.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Row 7: Migration Status ──────────────────────────────────────── */}
+      {migrations && migrations.active > 0 && (
+        <>
+          <div className="space-y-2 mt-4">
+            <div className="flex items-center gap-2">
+              <ArrowRight className="h-4 w-4 text-amber-500" />
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                Orchestration Migration{' '}
+              <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-amber-100 dark:bg-amber-900/40 px-2.5 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  {migrations.active} active
+                </span>
+              </h2>
+            </div>
+          </div>
+
+          {migrations.migrations.map((mig) => {
+            const progress = calcMigrationProgress(mig)
+            const phaseLabel =
+              mig.status === 'transferring_scheduled'
+                ? 'Transferring scheduled notifications…'
+                : mig.status === 'waiting_old_workers'
+                  ? 'Waiting for old workflows to complete…'
+                  : 'Migration in progress…'
+
+            return (
+              <Card key={mig.id} className="border-amber-400/50 bg-amber-50/50 dark:bg-amber-950/10">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <ArrowRight className="h-4 w-4 text-amber-500" />
+                    {mig.old_provider} → {mig.new_provider}
+                    {mig.client_name && (
+                      <span className="ml-1 text-muted-foreground font-normal">· {mig.client_name}</span>
+                    )}
+                  </CardTitle>
+                  <CardDescription className="text-xs">{phaseLabel}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {/* Progress bar */}
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs text-muted-foreground">
+                      <span>Progress</span>
+                      <span>{Math.round(progress * 100)}%</span>
+                    </div>
+                    <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-amber-500 transition-all"
+                        style={{ width: `${Math.min(100, Math.round(progress * 100))}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                    {/* Old workflow count */}
+                    <div className="rounded-lg border bg-card p-3">
+                      <p className="text-muted-foreground mb-1">Old workflows</p>
+                      <p className="text-lg font-semibold tabular-nums">
+                        {mig.old_workflow_count - mig.completed_old_workflows}
+                        <span className="text-xs text-muted-foreground font-normal ml-1">
+                          / {mig.old_workflow_count}
+                        </span>
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {mig.completed_old_workflows} completed
+                      </p>
+                    </div>
+
+                    {/* Scheduled transferred */}
+                    <div className="rounded-lg border bg-card p-3">
+                      <p className="text-muted-foreground mb-1">Scheduled transferred</p>
+                      <p className="text-lg font-semibold tabular-nums">
+                        {mig.migrated_scheduled_count}
+                        {mig.total_scheduled_count > 0 && (
+                          <span className="text-xs text-muted-foreground font-normal ml-1">
+                            / {mig.total_scheduled_count}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+
+                    {/* Old workers */}
+                    <div className="rounded-lg border bg-card p-3">
+                      <p className="text-muted-foreground mb-1">Old workers active</p>
+                      <p className="text-lg font-semibold tabular-nums text-amber-600">
+                        {migrations.old_worker_total}
+                      </p>
+                      {migrations.old_by_client?.length > 0 && (
+                        <p className="text-xs text-muted-foreground truncate">
+                          {migrations.old_by_client.map((c) => c.client_name).join(', ')}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* New workers */}
+                    <div className="rounded-lg border bg-card p-3">
+                      <p className="text-muted-foreground mb-1">New workers active</p>
+                      <p className="text-lg font-semibold tabular-nums text-emerald-600">
+                        {migrations.new_worker_total}
+                      </p>
+                      {migrations.new_by_client?.length > 0 && (
+                        <p className="text-xs text-muted-foreground truncate">
+                          {migrations.new_by_client.map((c) => c.client_name).join(', ')}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Old workers breakdown by priority */}
+                  {migrations.old_by_priority &&
+                    Object.keys(migrations.old_by_priority).length > 0 && (
+                      <div className="text-xs">
+                        <p className="text-muted-foreground mb-1 font-medium">Old workers by priority:</p>
+                        <div className="flex gap-3 flex-wrap">
+                          {PRIORITY_ORDER.map((p) =>
+                            (migrations!.old_by_priority[p] ?? 0) > 0 ? (
+                              <span
+                                key={p}
+                                className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5"
+                                style={{ color: PRIORITY_COLOR[p] }}
+                              >
+                                {p}: {migrations!.old_by_priority[p]}
+                              </span>
+                            ) : null,
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                  {/* Old workers breakdown by channel */}
+                  {migrations.old_by_channel &&
+                    Object.keys(migrations.old_by_channel).length > 0 && (
+                      <div className="text-xs">
+                        <p className="text-muted-foreground mb-1 font-medium">Old workers by channel:</p>
+                        <div className="flex gap-3 flex-wrap">
+                          {Object.entries(migrations.old_by_channel).map(([ch, count]) => (
+                            <span
+                              key={ch}
+                              className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 capitalize"
+                              style={{ color: CHANNEL_COLOR[ch] ?? '#6366f1' }}
+                            >
+                              {ch}: {count}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                  {/* Duration */}
+                  <p className="text-xs text-muted-foreground">
+                    Started {new Date(mig.started_at).toLocaleString()}
+                    {mig.old_workflow_count > 0 &&
+                      ` · ${mig.old_workflow_count - mig.completed_old_workflows} workflows remaining`}
+                  </p>
+                </CardContent>
+              </Card>
+            )
+          })}
+        </>
+      )}
+
+      {/* Completed migration notification banner */}
+      {migrations && migrations.active === 0 && migrations.migrations?.length > 0 && (
+        <Card className="border-emerald-400/50 bg-emerald-50 dark:bg-emerald-950/10">
+          <CardContent className="pt-5">
+            <div className="flex items-start gap-3">
+              <CheckCircle2 className="h-5 w-5 text-emerald-500 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-medium text-sm">All orchestration migrations completed</p>
+                <p className="text-xs text-muted-foreground">
+                  {migrations.migrations.filter((m) => m.status === 'completed').length} migrations completed
+                  successfully.
+                  {migrations.migrations.filter((m) => m.status === 'failed').length > 0 &&
+                    ` ${migrations.migrations.filter((m) => m.status === 'failed').length} failed.`}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Row 8: Workflow Cadence ──────────────────────────────────────── */}
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <Workflow className="h-4 w-4 text-muted-foreground" />
@@ -827,3 +1275,4 @@ export default function AdminDashboardPage() {
     </div>
   )
 }
+

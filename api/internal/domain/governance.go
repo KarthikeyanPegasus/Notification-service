@@ -41,6 +41,7 @@ type Suppression struct {
 	Value     string          `json:"value" db:"value"`
 	Reason    string          `json:"reason" db:"reason"`
 	Metadata  map[string]any  `json:"metadata" db:"metadata"`
+	CreatedBy string          `json:"created_by" db:"created_by"`
 	CreatedAt time.Time       `json:"created_at" db:"created_at"`
 }
 
@@ -50,6 +51,7 @@ type OptOut struct {
 	Channel   Channel          `json:"channel" db:"channel"`
 	Reason    string           `json:"reason" db:"reason"`
 	Source    string           `json:"source" db:"source"`
+	CreatedBy string           `json:"created_by" db:"created_by"`
 	CreatedAt time.Time        `json:"created_at" db:"created_at"`
 }
 

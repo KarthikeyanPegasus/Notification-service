@@ -230,6 +230,7 @@ func (s *SchedulerService) ListScheduled(
 	ctx context.Context,
 	statuses []domain.NotificationStatus,
 	page, pageSize int,
+	apiKeyID *uuid.UUID,
 ) ([]*domain.ScheduledNotification, int64, error) {
-	return s.schedRepo.List(ctx, statuses, page, pageSize)
+	return s.schedRepo.List(ctx, statuses, page, pageSize, apiKeyID)
 }

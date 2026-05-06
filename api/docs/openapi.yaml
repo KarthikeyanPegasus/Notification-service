@@ -10,8 +10,10 @@ info:
     and send message text via `body`, a template, or `template_variables` keys `message` / `text`.
     Async worker processing uses the Pub/Sub topic `notifications-slack`.
 
-    **Authentication:** All endpoints require a JWT `Bearer` token unless noted otherwise. Service-to-service
-    endpoints (OTP) use the `X-Service-Token` header instead.
+    **Authentication:** All endpoints require a Clerk session JWT `Bearer` token (via the Clerk SDK) unless noted otherwise.
+    Legacy HMAC JWT tokens are accepted during the migration period.
+    Service-to-service endpoints (OTP) use the `X-Service-Token` header instead.
+    Programmatic access via `X-API-Key` is also supported.
   version: 1.1.0
   contact:
     name: Spidey Deepmind Team
@@ -19,7 +21,9 @@ info:
 
 servers:
   - url: http://localhost:8080/v1
-    description: Local Development Server
+    description: Local Development API (v1)
+  - url: http://localhost:8080
+    description: Local Development root endpoints
 
 components:
   securitySchemes:
@@ -27,6 +31,10 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
     ServiceAuth:
       type: apiKey
       in: header
@@ -164,6 +172,65 @@ components:
           format: date-time
           description: ISO 8601 timestamp. When set, notification is deferred until this time.
         priority: { $ref: '#/components/schemas/Priority' }
+
+    BulkSendRequest:
+      type: object
+      required: [type, user_segment, channels]
+      properties:
+        type: { type: string }
+        template_id: { type: string, format: uuid, nullable: true }
+        subject: { type: string }
+        body: { type: string }
+        html: { type: string }
+        template_variables:
+          type: object
+          additionalProperties: { type: string }
+        user_segment:
+          type: object
+          additionalProperties: true
+          description: Must include `recipients` array with at least one recipient identifier.
+        channels:
+          type: array
+          items: { $ref: '#/components/schemas/Channel' }
+        scheduled_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    DNDWindow:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        start_hour: { type: integer, minimum: 0, maximum: 23 }
+        end_hour: { type: integer, minimum: 0, maximum: 23 }
+        timezone: { type: string }
+
+    UserPreferences:
+      type: object
+      properties:
+        user_id: { type: string }
+        channels:
+          type: object
+          additionalProperties: { type: boolean }
+        do_not_disturb:
+          $ref: '#/components/schemas/DNDWindow'
+        frequency_caps:
+          type: object
+          additionalProperties: { type: integer }
+        unsubscribed_types:
+          type: array
+          items: { type: string }
+        is_suppressed: { type: boolean }
+        updated_at: { type: string, format: date-time }
+
+    UpdatePreferencesRequest:
+      type: object
+      properties:
+        channels:
+          type: object
+          additionalProperties: { type: boolean }
+        do_not_disturb:
+          $ref: '#/components/schemas/DNDWindow'
 
     OTPSendRequest:
       type: object
@@ -324,25 +391,6 @@ components:
         created_at: { type: string, format: date-time }
         revoked_at: { type: string, format: date-time, nullable: true }
 
-    LoginRequest:
-      type: object
-      required: [email, password]
-      properties:
-        email: { type: string, format: email }
-        password: { type: string }
-
-    LoginResponse:
-      type: object
-      properties:
-        token: { type: string, description: JWT bearer token. }
-        user:
-          type: object
-          properties:
-            id: { type: string, format: uuid }
-            email: { type: string }
-            name: { type: string }
-            role: { type: string }
-
     VendorType:
       type: string
       description: Vendor identifier used in the App Store and `/admin/config/vendors/{vendor_type}`.
@@ -407,6 +455,30 @@ components:
         slack_channel:
           type: string
           description: Optional Slack channel name when using Slack vendor config channels.
+
+    VendorRateLimit:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        vendor_name: { type: string }
+        api_key_id: { type: string, format: uuid, nullable: true }
+        rps: { type: number, format: float, nullable: true }
+        per_minute: { type: integer, nullable: true }
+        per_10_min: { type: integer, nullable: true }
+        per_hour: { type: integer, nullable: true }
+        per_day: { type: integer, nullable: true }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    UpsertVendorRateLimitRequest:
+      type: object
+      properties:
+        rps: { type: number, format: float }
+        per_minute: { type: integer }
+        per_10_min: { type: integer }
+        per_hour: { type: integer }
+        per_day: { type: integer }
 
     VendorConfigPayloads:
       type: object
@@ -580,6 +652,21 @@ components:
       schema: { type: string, format: uuid }
 
   responses:
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
     TooManyRequests:
       description: Rate limit exceeded or IP blocked
       content:
@@ -592,6 +679,7 @@ components:
 
 security:
   - BearerAuth: []
+  - ApiKeyAuth: []
 
 tags:
   - name: Auth
@@ -610,27 +698,150 @@ tags:
     description: Message template CRUD
   - name: Admin
     description: Vendor config, API key management, and test delivery
+  - name: Webhooks
+    description: Provider and Clerk webhook callbacks
+  - name: WebSocket
+    description: WebSocket upgrade endpoint
+  - name: Preferences
+    description: Per-user notification preferences
+  - name: System
+    description: Service documentation and system utility endpoints
 
 paths:
+  # ── Root endpoints (outside /v1) ──────────────────────────────────────────
+  /health:
+    get:
+      summary: Health check
+      tags: [System]
+      security: []
+      servers:
+        - url: http://localhost:8080
+      responses:
+        '200':
+          description: Service healthy
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /metrics:
+    get:
+      summary: Prometheus metrics (internal only)
+      tags: [System]
+      security: []
+      servers:
+        - url: http://localhost:8080
+      responses:
+        '200':
+          description: Prometheus metrics payload
+        '403':
+          description: Access restricted to internal network
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /internal/circuit-breakers:
+    get:
+      summary: Circuit breaker snapshot (internal only)
+      tags: [System]
+      security: []
+      servers:
+        - url: http://localhost:8080
+      responses:
+        '200':
+          description: Circuit breaker states
+        '403':
+          description: Access restricted to internal network
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   # ── Auth ──────────────────────────────────────────────────────────────────
-  /auth/login:
+  # Authentication is handled by Clerk (https://clerk.com).
+  # UI: Use Clerk's <SignIn /> component or redirect to your Clerk portal.
+  # API: Include Clerk session JWT in the Authorization header.
+
+  # Provider delivery webhooks/callbacks
+  /webhooks/{provider}:
+    parameters:
+      - name: provider
+        in: path
+        required: true
+        schema: { type: string }
     post:
-      summary: Authenticate and obtain a JWT
-      tags: [Auth]
+      summary: Provider webhook callback (POST)
+      description: Inbound provider delivery/status webhook. Signature validation is provider-specific.
+      tags: [Webhooks]
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Webhook processed
+        '400':
+          description: Invalid payload
+        '401':
+          description: Invalid signature
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    get:
+      summary: Provider webhook callback (GET)
+      description: Some providers deliver status callbacks via GET query parameters.
+      tags: [Webhooks]
+      security: []
+      responses:
+        '200':
+          description: Callback processed
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # Clerk webhook for user sync
+  /webhooks/clerk:
+    post:
+      summary: Clerk user lifecycle webhook
+      tags: [Webhooks]
       security: []
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/LoginRequest' }
+            schema:
+              type: object
+              description: Clerk webhook payload (user.created, user.updated, user.deleted)
       responses:
         '200':
-          description: Login successful
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/LoginResponse' }
+          description: Webhook processed
         '401':
-          description: Invalid credentials
+          description: Invalid webhook signature
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # API self-documentation endpoints
+  /openapi.yaml:
+    get:
+      summary: Get OpenAPI YAML document
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: OpenAPI YAML
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /openapi.json:
+    get:
+      summary: Get OpenAPI JSON document
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: OpenAPI JSON
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   # ── Notifications ─────────────────────────────────────────────────────────
   /notifications:
@@ -659,8 +870,14 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
     get:
       summary: List notifications
@@ -706,6 +923,12 @@ paths:
                   total: { type: integer }
                   page: { type: integer }
                   page_size: { type: integer }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /notifications/{id}:
     parameters:
@@ -721,9 +944,36 @@ paths:
           description: Success
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Notification' }
+              schema:
+                type: object
+                properties:
+                  notification: { $ref: '#/components/schemas/Notification' }
+                  attempts:
+                    type: array
+                    items: { $ref: '#/components/schemas/NotificationAttempt' }
+                  events:
+                    type: array
+                    items: { $ref: '#/components/schemas/NotificationEvent' }
+                  subject: { type: string }
+                  body: { type: string }
+                  provider_status:
+                    type: object
+                    nullable: true
+                    properties:
+                      vendor_status: { type: string }
+                      success: { type: boolean }
+                      provider: { type: string }
+                      provider_msg_id: { type: string }
+                      error_code: { type: string }
+                      error_message: { type: string }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: Not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /notifications/{id}/sync:
     parameters:
@@ -745,11 +995,23 @@ paths:
               schema:
                 type: object
                 properties:
-                  status: { $ref: '#/components/schemas/NotificationStatus' }
-                  provider_status: { type: string }
-                  synced_at: { type: string, format: date-time }
+                  notification_id: { type: string, format: uuid }
+                  success: { type: boolean }
+                  vendor_status: { type: string }
+                  provider: { type: string }
+                  provider_msg_id: { type: string }
+                  error_code: { type: string }
+                  error_message: { type: string }
+        '400':
+          description: Invalid sync state (e.g. no provider message id)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: Not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /notifications/{id}/retrigger:
     parameters:
@@ -771,6 +1033,14 @@ paths:
                 properties:
                   notification_id: { type: string, format: uuid }
                   status: { type: string }
+        '400':
+          description: Retrigger failed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   # ── Scheduled notifications ───────────────────────────────────────────────
   /notifications/scheduled:
@@ -783,7 +1053,7 @@ paths:
           schema: { type: integer, default: 1 }
         - name: page_size
           in: query
-          schema: { type: integer, default: 20, maximum: 200 }
+          schema: { type: integer, default: 50, maximum: 200 }
         - name: status
           in: query
           schema: { $ref: '#/components/schemas/NotificationStatus' }
@@ -801,6 +1071,12 @@ paths:
                   total: { type: integer }
                   page: { type: integer }
                   page_size: { type: integer }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /notifications/{id}/schedule:
     parameters:
@@ -825,19 +1101,45 @@ paths:
           description: Rescheduled
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Notification' }
+              schema:
+                type: object
+                properties:
+                  notification_id: { type: string, format: uuid }
+                  status: { type: string }
+                  scheduled_at: { type: string, format: date-time }
+                  workflow_id: { type: string }
+                  reschedule_count: { type: integer }
         '400':
           description: Invalid time or not reschedulable
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: Not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     delete:
       summary: Cancel a scheduled notification
       tags: [Scheduled]
       responses:
-        '204':
+        '200':
           description: Cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notification_id: { type: string, format: uuid }
+                  status: { type: string, example: cancelled }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: Not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   # ── OTP ───────────────────────────────────────────────────────────────────
   /otp/send:
@@ -859,10 +1161,16 @@ paths:
               schema:
                 type: object
                 properties:
-                  otp_id: { type: string, format: uuid }
+                  otp_id: { type: string }
                   expiry_at: { type: string, format: date-time }
+        '400':
+          description: Validation error
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /otp/verify:
     post:
@@ -884,6 +1192,12 @@ paths:
                 type: object
                 properties:
                   verified: { type: boolean }
+        '400':
+          description: Validation error or invalid OTP
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   # ── Reports ───────────────────────────────────────────────────────────────
   /reports/summary:
@@ -903,6 +1217,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/ReportSummaryItem' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /reports/ingress:
     get:
@@ -921,6 +1241,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/IngressBreakdownItem' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /reports/sms-countries:
     get:
@@ -939,6 +1265,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/BreakdownRow' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /reports/email-domains:
     get:
@@ -957,6 +1289,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/BreakdownRow' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /reports/vendors:
     get:
@@ -973,6 +1311,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/VendorMetric' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /reports/billing:
     get:
@@ -992,6 +1336,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/VendorBilling' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /reports/scheduled-stats:
     get:
@@ -1011,6 +1361,12 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ScheduledStats' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   # ── Governance ────────────────────────────────────────────────────────────
   /governance/suppressions:
@@ -1028,6 +1384,10 @@ paths:
                 items: { $ref: '#/components/schemas/Suppression' }
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     post:
       summary: Add a suppression
       description: |
@@ -1052,6 +1412,10 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /governance/suppressions/{id}:
     parameters:
@@ -1070,6 +1434,10 @@ paths:
           description: Invalid ID
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /governance/opt-outs:
     get:
@@ -1086,6 +1454,10 @@ paths:
                 items: { $ref: '#/components/schemas/OptOut' }
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     post:
       summary: Opt a user out of a channel
       description: |
@@ -1110,6 +1482,10 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /governance/opt-outs/{id}:
     parameters:
@@ -1128,6 +1504,10 @@ paths:
           description: Invalid ID
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   # ── Templates ─────────────────────────────────────────────────────────────
   /templates:
@@ -1146,6 +1526,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/NotificationTemplate' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     post:
       summary: Create a template
       tags: [Templates]
@@ -1167,6 +1553,14 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationTemplate' }
+        '400':
+          description: Validation error
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /templates/{id}:
     parameters:
@@ -1183,6 +1577,14 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationTemplate' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     put:
       summary: Update a template
       tags: [Templates]
@@ -1204,12 +1606,28 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationTemplate' }
+        '400':
+          description: Validation error
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     delete:
       summary: Deactivate a template
       tags: [Templates]
       responses:
         '204':
           description: No Content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   # ── Admin – Vendor config ─────────────────────────────────────────────────
   /admin/config/vendors:
@@ -1230,6 +1648,10 @@ paths:
                 items: { $ref: '#/components/schemas/VendorConfig' }
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /admin/config/vendors/{vendor_type}:
     parameters:
@@ -1262,6 +1684,10 @@ paths:
           description: Invalid request
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     delete:
       summary: Remove (deactivate) a vendor configuration
       tags: [Admin]
@@ -1280,6 +1706,10 @@ paths:
                   message: { type: string }
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /admin/test-delivery/{vendor_type}:
     parameters:
@@ -1316,6 +1746,10 @@ paths:
           description: Validation error
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   # ── Admin – API key management ────────────────────────────────────────────
   /admin/api-keys:
@@ -1335,6 +1769,10 @@ paths:
                 items: { $ref: '#/components/schemas/ApiKeyClient' }
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
     post:
       summary: Create an API key
       description: Admin-only. Creates a new API key client. The raw key is returned once and cannot be retrieved again.
@@ -1360,8 +1798,14 @@ paths:
                 properties:
                   key: { $ref: '#/components/schemas/ApiKeyClient' }
                   api_key: { type: string, description: The raw API key. Store it securely — it will not be shown again. }
+        '400':
+          description: Validation error
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /admin/api-keys/{id}:
     parameters:
@@ -1380,6 +1824,10 @@ paths:
           description: Revoked
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   # ── Me (current user helpers) ─────────────────────────────────────────────
   /me/clients:
@@ -1399,3 +1847,677 @@ paths:
                 items: { $ref: '#/components/schemas/ApiKeyClient' }
         '401':
           description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      summary: Create a client/API key for current dev user
+      description: Dev-role only. Creates an API key and auto-assigns it to the caller.
+      tags: [Notifications]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '201':
+          description: Client created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { $ref: '#/components/schemas/ApiKeyClient' }
+                  api_key:
+                    type: string
+                    description: Raw API key shown once; store securely.
+        '400':
+          description: Validation error
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ── WebSocket ──────────────────────────────────────────────────────────────
+  /ws:
+    get:
+      summary: WebSocket upgrade for real-time notification delivery
+      description: Upgrade via HTTP GET with Bearer token in the `Authorization` header. Returns 101 Switching Protocols on success.
+      tags: [WebSocket]
+      security:
+        - BearerAuth: []
+      responses:
+        '101':
+          description: WebSocket connection established
+        '401':
+          description: Unauthorized
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ── User Preferences ──────────────────────────────────────────────────────
+  /users/{user_id}/notification-preferences:
+    parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Get user notification preferences
+      description: Admin/support roles can access any user's preferences. Other roles must own the user_id.
+      tags: [Preferences]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserPreferences' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden
+        '404':
+          description: Not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    put:
+      summary: Update user notification preferences
+      description: Admin/support roles can update any user's preferences. Other roles must own the user_id.
+      tags: [Preferences]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdatePreferencesRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserPreferences' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ── Admin Config ──────────────────────────────────────────────────────────
+  /admin/config/rate-limits:
+    get:
+      summary: List vendor rate limits
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Rate limits
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/VendorRateLimit' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/config/rate-limits/{vendor_name}:
+    parameters:
+      - name: vendor_name
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      summary: Upsert vendor rate limit
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertVendorRateLimitRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  vendor: { type: string }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    delete:
+      summary: Delete vendor rate limit
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  vendor: { type: string }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/config/autoscaler:
+    get:
+      summary: Get autoscaler config
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current autoscaler config
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    put:
+      summary: Update autoscaler config
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Updated autoscaler config
+        '400':
+          description: Invalid request body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/overview:
+    get:
+      summary: Admin dashboard overview
+      description: Aggregated system metrics including delivery stats, worker counts, Kafka lag, and DLQ stats.
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: window
+          in: query
+          schema: { type: string, enum: [1h, 3h, 6h, 12h, 1d, 1w, 1mo, 3mo] }
+      responses:
+        '200':
+          description: Admin overview
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/users:
+    get:
+      summary: List users (admin only)
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string, format: uuid }
+                    clerk_id: { type: string }
+                    email: { type: string, format: email }
+                    name: { type: string }
+                    role: { type: string, enum: [admin, manager, dev, support] }
+                    created_at: { type: string, format: date-time }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      summary: Create user (admin only)
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, name, password, role]
+              properties:
+                email: { type: string, format: email }
+                name: { type: string }
+                password: { type: string }
+                role: { type: string, enum: [admin, manager, dev, support] }
+      responses:
+        '201':
+          description: User created
+        '400':
+          description: Validation error
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      summary: Delete user (admin only)
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      responses:
+        '204':
+          description: Deleted
+        '400':
+          description: Invalid user ID or disallowed operation
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: User not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/users/{id}/role:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      summary: Set user role (admin only)
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [admin, manager, dev, support] }
+      responses:
+        '204':
+          description: Role updated
+        '400':
+          description: Invalid request
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /admin/users/{id}/clients:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: List user client assignments
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Assigned API key IDs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api_key_ids:
+                    type: array
+                    items: { type: string, format: uuid }
+        '400':
+          description: Invalid user ID
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    put:
+      summary: Set user client assignments
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [api_key_ids]
+              properties:
+                api_key_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Assignments updated
+        '400':
+          description: Invalid request
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/invitations:
+    post:
+      summary: Send invitation (admin only)
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role: { type: string, enum: [admin, manager, dev, support] }
+      responses:
+        '201':
+          description: Invitation created
+        '400':
+          description: Validation error
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/migrations:
+    get:
+      summary: List orchestration migrations
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: active_only
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Migration list
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/migrations/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Cancel an active migration
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Migration cancelled
+        '400':
+          description: Invalid migration ID
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/config/vendors/migrations:
+    post:
+      summary: Start vendor migration
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel, from_vendor, to_vendor, to_config]
+              properties:
+                channel: { type: string, enum: [email, sms, push] }
+                from_vendor: { type: string }
+                to_vendor: { type: string }
+                to_config:
+                  type: object
+                  additionalProperties: true
+                strategy: { type: string, enum: [instant, gradual] }
+      responses:
+        '201':
+          description: Migration started
+        '400':
+          description: Invalid migration request
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    get:
+      summary: List vendor migrations
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+        - name: channel
+          in: query
+          schema: { type: string, enum: [email, sms, push] }
+        - name: status
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Vendor migration list
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/config/vendors/migrations/{id}/complete:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Complete vendor migration
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Migration completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  migration_id: { type: string, format: uuid }
+        '400':
+          description: Invalid migration state or ID
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /admin/config/vendors/migrations/{id}/rollback:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Rollback vendor migration
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApiKeyIdScope'
+      responses:
+        '200':
+          description: Migration rolled back
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  migration_id: { type: string, format: uuid }
+        '400':
+          description: Invalid migration state or ID
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ── Bulk Send ─────────────────────────────────────────────────────────────
+  /notifications/bulk:
+    post:
+      summary: Queue bulk notifications for asynchronous fan-out
+      description: Accepts recipients and channels, then enqueues a bulk job.
+      tags: [Notifications]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkSendRequest' }
+      responses:
+        '202':
+          description: Bulk job accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bulk_job_id: { type: string }
+                  status: { type: string }
+                  recipients: { type: integer }
+                  message: { type: string }
+        '400':
+          description: Validation error
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ── Channel Metrics ───────────────────────────────────────────────────────
+  /reports/channel-metrics:
+    get:
+      summary: Get daily channel metrics
+      tags: [Reports]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer, default: 7, maximum: 90 }
+      responses:
+        '200':
+          description: Channel metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  days: { type: integer }
+                  metrics:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden
+        '500':
+          $ref: '#/components/responses/InternalServerError'

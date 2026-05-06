@@ -84,6 +84,11 @@ func NotificationWorkflow(ctx workflow.Context, req *WorkflowRequest) error {
 		return fail("render_template", err)
 	}
 
+	// Step 2.5: Content Security & Spam check
+	if err := workflow.ExecuteActivity(ctx, "ContentSecurityCheckActivity", &rendered).Get(ctx, nil); err != nil {
+		return fail("content_security_check", err)
+	}
+
 	// Step 3: Direct Delivery
 	var result domain.DeliveryResult
 	if err := workflow.ExecuteActivity(ctx, "DeliverNotificationActivity", &rendered).Get(ctx, &result); err != nil {
@@ -151,6 +156,11 @@ func OtpNotificationWorkflow(ctx workflow.Context, req *WorkflowRequest) error {
 		Payload:   []byte("Your OTP is " + otp + ". Valid for 5 minutes."),
 	}
 
+	// Step 2.5: Content Security & Spam check
+	if err := workflow.ExecuteActivity(ctx, "ContentSecurityCheckActivity", &rendered).Get(ctx, nil); err != nil {
+		return fail("content_security_check", err)
+	}
+
 	var result domain.DeliveryResult
 	if err := workflow.ExecuteActivity(ctx, "DeliverNotificationActivity", &rendered).Get(ctx, &result); err != nil {
 		return fail("deliver_notification", err)
@@ -187,10 +197,57 @@ type BulkJob struct {
 	ID         string
 	TemplateID string
 	Channel    string
+	// Recipients is the pre-resolved list of recipient addresses for this job.
+	Recipients []string
+	// Requests is the fully constructed per-recipient workflow requests.
+	// When non-empty it takes precedence over Recipients + TemplateID.
+	Requests   []*WorkflowRequest
 	Filter     map[string]interface{}
 }
 
+// BulkNotificationWorkflow fans out one child NotificationWorkflow per recipient.
+// Each child runs with its own retry budget; a failed child does not abort siblings.
 func BulkNotificationWorkflow(ctx workflow.Context, job BulkJob) error {
-	// Minimal mock placeholder for fan-out
+	channel := domain.Channel(job.Channel)
+
+	// Build per-recipient WorkflowRequests when not pre-populated.
+	requests := job.Requests
+	if len(requests) == 0 {
+		for _, recipient := range job.Recipients {
+			requests = append(requests, &WorkflowRequest{
+				Channel:    channel,
+				Priority:   domain.PriorityLow,
+				Recipient:  recipient,
+				TemplateID: &job.TemplateID,
+				ClientID:   "",
+			})
+		}
+	}
+
+	// Fan out: launch all child workflows in parallel, collect futures.
+	cwo := workflow.ChildWorkflowOptions{
+		WorkflowExecutionTimeout: 2 * time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			MaximumAttempts: 2,
+		},
+	}
+	childCtx := workflow.WithChildOptions(ctx, cwo)
+
+	futures := make([]workflow.Future, 0, len(requests))
+	for _, req := range requests {
+		futures = append(futures, workflow.ExecuteChildWorkflow(childCtx, NotificationWorkflow, req))
+	}
+
+	// Wait for all children; accumulate errors but do not fail the bulk job on partial failure.
+	var failed int
+	for _, f := range futures {
+		if err := f.Get(ctx, nil); err != nil {
+			failed++
+		}
+	}
+
+	if failed > 0 {
+		return fmt.Errorf("bulk job %s: %d/%d recipients failed delivery", job.ID, failed, len(requests))
+	}
 	return nil
 }

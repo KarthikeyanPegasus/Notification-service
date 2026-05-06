@@ -27,4 +27,8 @@ type WorkflowRequest struct {
 	// ClientID is the API key ID of the calling client, used for scoped vendor config
 	// and rate limiting within delivery activities.
 	ClientID string
+	// TraceID is the originating HTTP X-Request-ID, propagated for end-to-end correlation.
+	TraceID string
+	// UserID is the optional user identifier used for preference and governance checks.
+	UserID string
 }

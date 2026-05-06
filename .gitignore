@@ -33,6 +33,7 @@ api/api_start.log
 # Config
 api/config/config.yaml
 api/config/*.local.yaml
+api/config/pub-sub-key.json
 api/config/*.json
 
 # Go (api/)

@@ -1,3 +1,5 @@
+'use client'
+
 import { OptOutTable } from '@/components/governance/opt-out-table'
 
 export default function OptOutsPage() {

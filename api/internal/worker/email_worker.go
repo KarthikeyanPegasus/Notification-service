@@ -28,6 +28,7 @@ type EmailWorker struct {
 
 func NewEmailWorker(
 	subscriber pubsub.Subscriber,
+	publisher pubsub.Publisher,
 	senders []provider.Sender,
 	notifRepo *repository.NotificationRepository,
 	attemptRepo *repository.AttemptRepository,
@@ -52,6 +53,7 @@ func NewEmailWorker(
 			domain.ChannelEmail,
 			subKey,
 			subscriber,
+			publisher,
 			notifRepo,
 			attemptRepo,
 			eventRepo,

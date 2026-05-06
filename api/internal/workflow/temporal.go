@@ -133,6 +133,10 @@ func (e *TemporalEngine) ProviderName() string {
 	return "temporal"
 }
 
+func (e *TemporalEngine) Identity() string {
+	return "temporal|" + e.hostPort + "|" + e.namespace
+}
+
 func (e *TemporalEngine) Close() {
 	e.mu.Lock()
 	defer e.mu.Unlock()

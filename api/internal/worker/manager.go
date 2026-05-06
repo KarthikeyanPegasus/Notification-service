@@ -6,6 +6,11 @@
 //
 // The WorkerManager reconciles every ReconcileInterval by reading active API keys
 // from the DB and ensuring a Temporal worker is registered for every combination.
+//
+// During orchestration migrations (client switches temporal↔cadence or changes
+// host/port/namespace), the WorkerManager supports dual-mode operation:
+// old-provider workers stay alive until migration completes while new-provider
+// workers start serving the same task queues.
 package worker
 
 import (
@@ -15,11 +20,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/spidey/notification-service/internal/autoscaler"
 	"github.com/spidey/notification-service/internal/domain"
 	"github.com/spidey/notification-service/internal/repository"
 	wf "github.com/spidey/notification-service/internal/workflow"
 	"go.uber.org/zap"
 )
+
+// AutoScalerProvider is the subset of autoscaler.AutoScaler that the
+// WorkerManager needs. Defined here to avoid a hard dependency.
+type AutoScalerProvider interface {
+	GetDesiredParallelism(clientID, channel, priority string) int32
+}
 
 const ReconcileInterval = 30 * time.Second
 
@@ -28,8 +41,19 @@ type workerEntry struct {
 	w      wf.WorkflowWorker
 	stopCh chan interface{}
 	// providerName is the workflow engine provider used to register/run this worker.
-	// Used to restart the worker when a client switches temporal/cadence.
 	providerName string
+	// identity is the unique connection string for the engine (e.g. host:port|namespace).
+	identity string
+}
+
+// workerGroup holds one or more worker goroutines for the same task queue.
+// Multiple workers on the same task queue provide parallel consumption.
+type workerGroup struct {
+	taskQueue    string
+	providerName string
+	identity     string
+	workers      []*workerEntry
+	desiredCount int32 // target number of workers from the last reconcile
 }
 
 // WorkerClientSummary aggregates worker counts for a single client (or global).
@@ -50,14 +74,49 @@ type WorkerState struct {
 	UpdatedAt  time.Time             `json:"updated_at"`
 }
 
+// MigrationWorkerState extends WorkerState with migration-specific breakdowns.
+type MigrationWorkerState struct {
+	OldWorkerTotal      int                   `json:"old_worker_total"`
+	OldByPriority       map[string]int        `json:"old_by_priority"`
+	OldByChannel        map[string]int        `json:"old_by_channel"`
+	OldByClient         []WorkerClientSummary `json:"old_by_client"`
+	NewWorkerTotal      int                   `json:"new_worker_total"`
+	NewByPriority       map[string]int        `json:"new_by_priority"`
+	NewByChannel        map[string]int        `json:"new_by_channel"`
+	NewByClient         []WorkerClientSummary `json:"new_by_client"`
+	ActiveMigrationIDs  []string              `json:"active_migration_ids"`
+}
+
+// migrationState tracks a client whose orchestration layer is being migrated.
+type migrationState struct {
+	migrationID  uuid.UUID
+	clientID     string
+	oldProvider  string
+	oldEngine    wf.WorkflowEngine
+	newProvider  string
+	startedAt    time.Time
+}
+
+// runnerKey is the internal key for the running map, combining task queue
+// and provider discriminator so that during migration both old and new
+// provider workers can coexist on the same task queue name.
+func runnerKey(taskQueue, provider, discriminator string) string {
+	return taskQueue + "|" + provider + "|" + discriminator
+}
+
 // WorkerManager dynamically creates and tears down Temporal/Cadence workflow workers,
-// one per (clientID × channel × priority) combination.
-// Each worker registers on task queue notif-{channel}-{priority}-{clientID}.
-// The Dispatcher routes Kafka messages to the correct task queue, so each client's
-// notifications are handled by its own dedicated Temporal worker independently.
+// supporting multiple workers per (clientID × channel × priority) task queue for
+// parallel consumption.
+// Each worker group registers on task queue notif-{channel}-{priority}-{clientID}.
+// The Dispatcher routes Kafka messages to the correct task queue.
+//
+// Auto-scaling:
+// When an AutoScalerProvider is attached via SetAutoScaler(), the reconcile loop
+// adjusts the number of workers per task queue based on MTTD and Kafka lag.
+// Workers are stopped when not needed (scale-down) respecting cooldown periods.
 type WorkerManager struct {
 	mu      sync.RWMutex
-	running map[string]*workerEntry // taskQueue → entry
+	groups  map[string]*workerGroup // key: runnerKey (taskQueue|provider|discriminator) → group
 
 	// clientNames caches clientID → name from the last reconcile for state reporting.
 	clientNames map[string]string
@@ -67,9 +126,14 @@ type WorkerManager struct {
 
 	// vendorConfigRepo provides access to per-client vendor configs (e.g. worker_pool).
 	vendorConfigRepo repository.VendorConfigRepository
-	acts       *wf.Activities
-	apiKeyRepo *repository.APIKeyRepository
-	log        *zap.Logger
+	autoscaler  AutoScalerProvider
+	acts        *wf.Activities
+	apiKeyRepo  *repository.APIKeyRepository
+	log         *zap.Logger
+
+	// migrations tracks clients currently being migrated.
+	// Key: clientID (or "global" for nil scope).
+	migrations map[string]*migrationState
 }
 
 // workflowEngineProvider abstracts service.WorkflowClientProvider so the worker package
@@ -86,14 +150,24 @@ func NewWorkerManager(
 	log *zap.Logger,
 ) *WorkerManager {
 	return &WorkerManager{
-		running:     make(map[string]*workerEntry),
+		groups:     make(map[string]*workerGroup),
 		clientNames: make(map[string]string),
 		engineProvider: engineProvider,
 		vendorConfigRepo: vendorConfigRepo,
 		acts:        acts,
 		apiKeyRepo:  apiKeyRepo,
 		log:         log,
+		migrations:  make(map[string]*migrationState),
 	}
+}
+
+// SetAutoScaler attaches an autoscaler to this WorkerManager.
+// The autoscaler's desired parallelism is consulted during each reconcile.
+func (m *WorkerManager) SetAutoScaler(as AutoScalerProvider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.autoscaler = as
+	m.log.Info("autoscaler attached to worker manager")
 }
 
 // Run starts the reconciliation loop. Blocks until ctx is cancelled.
@@ -115,7 +189,95 @@ func (m *WorkerManager) Run(ctx context.Context) {
 	}
 }
 
+// StartMigration tells the WorkerManager to keep old-provider workers alive
+// for the given client scope during an orchestration migration.
+func (m *WorkerManager) StartMigration(ctx context.Context, migrationID uuid.UUID, apiKeyID *uuid.UUID, oldEngine, newEngine wf.WorkflowEngine) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	clientID := clientIDFromPtr(apiKeyID)
+
+	if _, exists := m.migrations[clientID]; exists {
+		m.log.Warn("migration already in progress for client, replacing",
+			zap.String("client_id", clientID),
+			zap.String("migration_id", migrationID.String()),
+		)
+	}
+
+	oldProvider := ""
+	if oldEngine != nil {
+		oldProvider = oldEngine.ProviderName()
+	}
+	newProvider := ""
+	if newEngine != nil {
+		newProvider = newEngine.ProviderName()
+	}
+
+	m.migrations[clientID] = &migrationState{
+		migrationID: migrationID,
+		clientID:    clientID,
+		oldProvider: oldProvider,
+		oldEngine:   oldEngine,
+		newProvider: newProvider,
+		startedAt:   time.Now(),
+	}
+
+	m.log.Info("migration started — old workers retained",
+		zap.String("client_id", clientID),
+		zap.String("migration_id", migrationID.String()),
+		zap.String("old_provider", oldProvider),
+		zap.String("new_provider", newProvider),
+	)
+}
+
+// CompleteMigration tells the WorkerManager to stop old-provider workers
+// for the given client scope after migration completes.
+func (m *WorkerManager) CompleteMigration(ctx context.Context, migrationID uuid.UUID, apiKeyID *uuid.UUID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	clientID := clientIDFromPtr(apiKeyID)
+	mig, exists := m.migrations[clientID]
+	if !exists {
+		return
+	}
+	if mig.migrationID != migrationID {
+		m.log.Warn("migration ID mismatch on completion",
+			zap.String("expected", mig.migrationID.String()),
+			zap.String("got", migrationID.String()),
+		)
+		return
+	}
+
+	// Stop all old-provider workers for this client.
+	discriminator := oldDiscriminator(clientID, migrationID)
+	for key, group := range m.groups {
+		if group.providerName == mig.oldProvider && containsDiscriminator(key, discriminator) {
+			for _, entry := range group.workers {
+				close(entry.stopCh)
+			}
+			delete(m.groups, key)
+			m.log.Info("stopped old-provider worker group after migration",
+				zap.String("key", key),
+				zap.String("provider", mig.oldProvider),
+				zap.Int("worker_count", len(group.workers)),
+			)
+		}
+	}
+
+	delete(m.migrations, clientID)
+	m.updateWorkerGauge()
+
+	m.log.Info("migration completed — old workers stopped",
+		zap.String("client_id", clientID),
+		zap.String("migration_id", migrationID.String()),
+		zap.String("old_provider", mig.oldProvider),
+	)
+}
+
 // reconcile re-reads API keys and ensures the right Temporal workers are running.
+// With autoscaler support, it also adjusts the number of workers per task queue
+// for parallel consumption, stopping excess workers when not needed.
 func (m *WorkerManager) reconcile(ctx context.Context) {
 	m.log.Debug("reconciling workflow workers")
 
@@ -135,48 +297,149 @@ func (m *WorkerManager) reconcile(ctx context.Context) {
 		m.clientNames[k.ID] = k.Name
 	}
 
-	// Start/refresh workers for desired combinations.
-	for tq, dw := range desired {
-		if existing, ok := m.running[tq]; ok {
-			if existing.providerName != dw.providerName {
-				m.log.Info("restarting workflow worker (provider changed)",
-					zap.String("task_queue", tq),
-					zap.String("from_provider", existing.providerName),
-					zap.String("to_provider", dw.providerName),
-				)
-				close(existing.stopCh)
-				delete(m.running, tq)
-			} else {
-				continue
+	// ── Determine desired parallelism (base + autoscaler) ────────────────
+	// tqParallelism maps taskQueue -> target worker count
+	tqParallelism := make(map[string]int32)
+	for tq := range desired {
+		parallelism := int32(1) // base: at least 1 worker
+
+		// Consult autoscaler for per-client/channel/priority scaling
+		if m.autoscaler != nil {
+			clientID, ch, pr := parseTaskQueue(tq)
+			if desiredP := m.autoscaler.GetDesiredParallelism(clientID, ch, pr); desiredP > parallelism {
+				parallelism = desiredP
 			}
 		}
 
-		if err := m.startWorkerLocked(ctx, tq, dw.engine); err != nil {
-			m.log.Error("failed to start workflow worker",
-				zap.String("task_queue", tq),
-				zap.String("provider", dw.providerName),
-				zap.Error(err),
-			)
+		tqParallelism[tq] = parallelism
+	}
+
+	// ── Reconcile standard workers (new provider) ────────────────────────
+	type taskQueueTarget struct {
+		engine       wf.WorkflowEngine
+		providerName string
+		parallelism  int32
+	}
+	targets := make(map[string]*taskQueueTarget)
+
+	for tq, dw := range desired {
+		baseKey := runnerKey(tq, dw.providerName, "current")
+		targets[baseKey] = &taskQueueTarget{
+			engine:       dw.engine,
+			providerName: dw.providerName,
+			parallelism:  tqParallelism[tq],
 		}
 	}
 
-	// Stop workers for removed combinations.
-	for tq, entry := range m.running {
-		if _, ok := desired[tq]; !ok {
-			m.log.Info("stopping workflow worker (key removed)", zap.String("task_queue", tq))
-			close(entry.stopCh)
-			delete(m.running, tq)
+	// ── Reconcile migration old-provider workers ─────────────────────────
+	for clientID, mig := range m.migrations {
+		if mig.oldEngine == nil {
+			continue
+		}
+		discriminator := oldDiscriminator(clientID, mig.migrationID)
+
+		for tq, dw := range desired {
+			if !tqMatchesClient(tq, clientID) {
+				continue
+			}
+			if dw.engine.Identity() == mig.oldEngine.Identity() {
+				continue
+			}
+
+			baseKey := runnerKey(tq, mig.oldProvider, discriminator)
+			// Migration workers get same parallelism as their new-provider counterparts
+			targets[baseKey] = &taskQueueTarget{
+				engine:       mig.oldEngine,
+				providerName: mig.oldProvider,
+				parallelism:  tqParallelism[tq],
+			}
 		}
 	}
+
+	// ── Reconcile each target group ──────────────────────────────────────
+	for baseKey, target := range targets {
+		group := m.groups[baseKey]
+		if group == nil {
+			// New group — create it
+			group = &workerGroup{
+				taskQueue:    extractTaskQueue(baseKey),
+				providerName: target.providerName,
+				identity:     target.engine.Identity(),
+			}
+			m.groups[baseKey] = group
+		} else if group.providerName != target.providerName || group.identity != target.engine.Identity() {
+			// Provider or identity changed — recreate all workers
+			m.log.Info("restarting worker group (config changed)",
+				zap.String("key", baseKey),
+				zap.String("from_identity", group.identity),
+				zap.String("to_identity", target.engine.Identity()),
+			)
+			for _, entry := range group.workers {
+				close(entry.stopCh)
+			}
+			group.workers = nil
+			group.providerName = target.providerName
+			group.identity = target.engine.Identity()
+		}
+
+		group.desiredCount = target.parallelism
+
+		// Scale up: start missing workers
+		currentCount := int32(len(group.workers))
+		for i := currentCount; i < target.parallelism; i++ {
+			entryKey := fmt.Sprintf("%s|worker-%d", baseKey, i)
+			entry, err := m.startSingleWorker(group.taskQueue, target.engine, entryKey)
+			if err != nil {
+				m.log.Error("failed to start worker",
+					zap.String("key", entryKey),
+					zap.Error(err),
+				)
+				continue
+			}
+			group.workers = append(group.workers, entry)
+		}
+
+		// Scale down: stop excess workers
+		if int32(len(group.workers)) > target.parallelism {
+			excess := int32(len(group.workers)) - target.parallelism
+			m.log.Info("scaling down workers",
+				zap.String("key", baseKey),
+				zap.Int32("from", int32(len(group.workers))),
+				zap.Int32("to", target.parallelism),
+				zap.Int32("excess", excess),
+			)
+			// Stop from the end
+			stop := group.workers[target.parallelism:]
+			for _, entry := range stop {
+				close(entry.stopCh)
+			}
+			group.workers = group.workers[:target.parallelism]
+		}
+	}
+
+	// ── Remove groups that are no longer desired ─────────────────────────
+	for k, group := range m.groups {
+		if _, ok := targets[k]; !ok {
+			m.log.Info("stopping worker group (no longer desired)", zap.String("key", k))
+			for _, entry := range group.workers {
+				close(entry.stopCh)
+			}
+			delete(m.groups, k)
+		}
+	}
+
+	// ── Export actual parallelism metrics ────────────────────────────────
+	m.exportParallelismMetrics()
 }
 
+// desiredWorker describes a worker that should be active.
 type desiredWorker struct {
 	engine       wf.WorkflowEngine
 	providerName string
+	parallelism  int32 // how many worker goroutines for this task queue
 }
 
 // desiredWorkers returns the workflow-worker task queues that must be active.
-// It filters per-client on the engine returned by WorkflowClientProvider (temporal/cadence/standalone).
 func (m *WorkerManager) desiredWorkers(ctx context.Context, keys []*domain.APIKey) map[string]*desiredWorker {
 	set := make(map[string]*desiredWorker)
 
@@ -212,11 +475,9 @@ func (m *WorkerManager) desiredWorkers(ctx context.Context, keys []*domain.APIKe
 	}
 
 	enabledPriorityCount := func(ch domain.Channel, pool *workerPoolConfig) int {
-		// Channels not covered by the pool config keep the default: all priority tiers.
 		if pool == nil {
 			return lenPriorities
 		}
-
 		var minW, maxW int
 		switch ch {
 		case domain.ChannelEmail:
@@ -234,13 +495,9 @@ func (m *WorkerManager) desiredWorkers(ctx context.Context, keys []*domain.APIKe
 		default:
 			return lenPriorities
 		}
-
-		// If both are zero/unset, default to all tiers.
 		if minW <= 0 && maxW <= 0 {
 			return lenPriorities
 		}
-
-		// Clamp to valid bounds.
 		if minW < 0 {
 			minW = 0
 		}
@@ -253,25 +510,21 @@ func (m *WorkerManager) desiredWorkers(ctx context.Context, keys []*domain.APIKe
 		if maxW > lenPriorities {
 			maxW = lenPriorities
 		}
-
 		if maxW > 0 {
 			if maxW < minW {
 				return maxW
 			}
 			return maxW
 		}
-		// No max specified => use min.
 		if minW <= 0 {
 			return lenPriorities
 		}
 		return minW
 	}
 
-	// Pre-load global worker pool config once per reconcile.
 	globalPool := getPool(nil)
 
-	// Global workers: handle notifications without a client scope.
-	// If the engine provider returns nil for global, we skip global workers.
+	// Global workers.
 	if m.engineProvider != nil {
 		if globalEngine, _ := m.engineProvider.ClientForScope(ctx, nil); globalEngine != nil {
 			for _, ch := range AllChannels() {
@@ -287,9 +540,8 @@ func (m *WorkerManager) desiredWorkers(ctx context.Context, keys []*domain.APIKe
 		}
 	}
 
-	// Per-client workers: one task queue per key × channel × priority.
+	// Per-client workers.
 	for _, k := range keys {
-		// Revoked clients should not have any workers.
 		if k == nil || k.RevokedAt != nil {
 			continue
 		}
@@ -299,7 +551,6 @@ func (m *WorkerManager) desiredWorkers(ctx context.Context, keys []*domain.APIKe
 		id := k.ID
 		engine, _ := m.engineProvider.ClientForScope(ctx, &id)
 		if engine == nil {
-			// Provider "standalone" (or missing config + defaultEngine nil) => no workers for this client.
 			continue
 		}
 
@@ -323,10 +574,11 @@ func (m *WorkerManager) desiredWorkers(ctx context.Context, keys []*domain.APIKe
 	return set
 }
 
-// startWorkerLocked registers a new workflow worker on taskQueue. Must hold m.mu.
-func (m *WorkerManager) startWorkerLocked(ctx context.Context, taskQueue string, engine wf.WorkflowEngine) error {
+// startSingleWorker creates and starts a single workflow worker on the given
+// task queue. Returns the workerEntry. Does NOT hold the lock — the caller must.
+func (m *WorkerManager) startSingleWorker(taskQueue string, engine wf.WorkflowEngine, key string) (*workerEntry, error) {
 	if engine == nil {
-		return nil
+		return nil, nil
 	}
 
 	w := engine.NewWorker(taskQueue)
@@ -339,52 +591,50 @@ func (m *WorkerManager) startWorkerLocked(ctx context.Context, taskQueue string,
 		w.RegisterWorkflow(wf.BulkNotificationWorkflow)
 	}
 
-	w.RegisterActivity(m.acts.CheckPreferencesActivity)
-	w.RegisterActivity(m.acts.RenderTemplateActivity)
-	w.RegisterActivity(m.acts.DeliverNotificationActivity)
-	w.RegisterActivity(m.acts.LogDeliveryActivity)
-	w.RegisterActivity(m.acts.GenerateOtpActivity)
+	// Register all activities in the Activities struct.
+	w.RegisterActivity(m.acts)
 
 	stopCh := make(chan interface{})
 	go func() {
 		if err := w.Run(stopCh); err != nil {
 			m.log.Error("workflow worker exited with error",
-				zap.String("task_queue", taskQueue), zap.Error(err))
+				zap.String("key", key), zap.Error(err))
 		}
 	}()
 
-	m.running[taskQueue] = &workerEntry{
-		w:             w,
-		stopCh:        stopCh,
-		providerName: engine.ProviderName(),
-	}
 	m.log.Info("started workflow worker",
+		zap.String("key", key),
 		zap.String("task_queue", taskQueue),
 		zap.String("provider", engine.ProviderName()),
 	)
 	m.updateWorkerGauge()
-	return nil
+
+	return &workerEntry{
+		w:             w,
+		stopCh:        stopCh,
+		providerName: engine.ProviderName(),
+		identity:      engine.Identity(),
+	}, nil
 }
 
 // stopAll gracefully stops all running workers.
 func (m *WorkerManager) stopAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for tq, entry := range m.running {
-		close(entry.stopCh)
-		delete(m.running, tq)
-		m.log.Info("stopped temporal worker", zap.String("task_queue", tq))
+	for k, group := range m.groups {
+		for _, entry := range group.workers {
+			close(entry.stopCh)
+		}
+		delete(m.groups, k)
+		m.log.Info("stopped worker group", zap.String("key", k), zap.Int("count", len(group.workers)))
 	}
 	m.updateWorkerGauge()
 }
 
-// updateWorkerGauge used to emit Prometheus metrics (TemporalWorkersActive).
-// Prometheus/Grafana are intentionally removed from this service for now.
-func (m *WorkerManager) updateWorkerGauge() {
-	// no-op
-}
+// updateWorkerGauge no-op.
+func (m *WorkerManager) updateWorkerGauge() {}
 
-// GetState returns a point-in-time snapshot of the worker fleet, safe to serve over HTTP.
+// GetState returns a point-in-time snapshot of the worker fleet.
 func (m *WorkerManager) GetState() WorkerState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -395,10 +645,10 @@ func (m *WorkerManager) GetState() WorkerState {
 		UpdatedAt:  time.Now(),
 	}
 
-	// clientData: clientID → *WorkerClientSummary
 	clientData := make(map[string]*WorkerClientSummary)
 
-	for tq := range m.running {
+	for _, group := range m.groups {
+		tq := group.taskQueue
 		for _, ch := range AllChannels() {
 			for _, p := range AllPriorities() {
 				prefix := fmt.Sprintf("notif-%s-%s-", ch, p)
@@ -408,10 +658,11 @@ func (m *WorkerManager) GetState() WorkerState {
 				clientID := tq[len(prefix):]
 				chStr := string(ch)
 				prStr := string(p)
+				count := len(group.workers)
 
-				state.Total++
-				state.ByPriority[prStr]++
-				state.ByChannel[chStr]++
+				state.Total += count
+				state.ByPriority[prStr] += count
+				state.ByChannel[chStr] += count
 
 				if _, ok := clientData[clientID]; !ok {
 					name := m.clientNames[clientID]
@@ -425,9 +676,9 @@ func (m *WorkerManager) GetState() WorkerState {
 						ByChannel:  make(map[string]int),
 					}
 				}
-				clientData[clientID].Total++
-				clientData[clientID].ByPriority[prStr]++
-				clientData[clientID].ByChannel[chStr]++
+				clientData[clientID].Total += count
+				clientData[clientID].ByPriority[prStr] += count
+				clientData[clientID].ByChannel[chStr] += count
 			}
 		}
 	}
@@ -435,11 +686,77 @@ func (m *WorkerManager) GetState() WorkerState {
 	for _, s := range clientData {
 		state.ByClient = append(state.ByClient, *s)
 	}
+	return state
+}
+
+// GetMigrationWorkersState returns a detailed breakdown of old vs new workers
+// during active migrations.
+func (m *WorkerManager) GetMigrationWorkersState() MigrationWorkerState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	state := MigrationWorkerState{
+		OldByPriority: make(map[string]int),
+		OldByChannel:  make(map[string]int),
+		NewByPriority: make(map[string]int),
+		NewByChannel:  make(map[string]int),
+	}
+
+	oldClientData := make(map[string]*WorkerClientSummary)
+	newClientData := make(map[string]*WorkerClientSummary)
+
+	for key, group := range m.groups {
+		isOld := false
+		for _, mig := range m.migrations {
+			if group.providerName == mig.oldProvider && containsDiscriminator(key, oldDiscriminator(mig.clientID, mig.migrationID)) {
+				isOld = true
+				break
+			}
+		}
+
+		tq := group.taskQueue
+		count := len(group.workers)
+
+		for _, ch := range AllChannels() {
+			for _, p := range AllPriorities() {
+				prefix := fmt.Sprintf("notif-%s-%s-", ch, p)
+				if len(tq) < len(prefix) || tq[:len(prefix)] != prefix {
+					continue
+				}
+				clientID := tq[len(prefix):]
+				chStr := string(ch)
+				prStr := string(p)
+
+				if isOld {
+					state.OldWorkerTotal += count
+					state.OldByPriority[prStr] += count
+					state.OldByChannel[chStr] += count
+					updateClientSummary(oldClientData, clientID, chStr, prStr, m.clientNames)
+				} else {
+					state.NewWorkerTotal += count
+					state.NewByPriority[prStr] += count
+					state.NewByChannel[chStr] += count
+					updateClientSummary(newClientData, clientID, chStr, prStr, m.clientNames)
+				}
+			}
+		}
+	}
+
+	for _, s := range oldClientData {
+		state.OldByClient = append(state.OldByClient, *s)
+	}
+	for _, s := range newClientData {
+		state.NewByClient = append(state.NewByClient, *s)
+	}
+
+	for _, mig := range m.migrations {
+		state.ActiveMigrationIDs = append(state.ActiveMigrationIDs, mig.migrationID.String())
+	}
 
 	return state
 }
 
-// Reload triggers an immediate reconcile (e.g. after a new API key is created).
+// Reload triggers an immediate reconcile.
 func (m *WorkerManager) Reload(ctx context.Context) {
 	m.reconcile(ctx)
 }
@@ -463,4 +780,114 @@ func AllPriorities() []domain.Priority {
 		domain.PriorityMedium,
 		domain.PriorityLow,
 	}
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+func clientIDFromPtr(apiKeyID *uuid.UUID) string {
+	if apiKeyID == nil {
+		return "global"
+	}
+	return apiKeyID.String()
+}
+
+func oldDiscriminator(clientID string, migrationID uuid.UUID) string {
+	return "migration:" + migrationID.String() + ":" + clientID
+}
+
+func containsDiscriminator(key, discriminator string) bool {
+	// Key format: taskQueue|provider|discriminator
+	return len(key) > len(discriminator) && key[len(key)-len(discriminator):] == discriminator
+}
+
+func extractTaskQueue(key string) string {
+	// Key format: taskQueue|provider|discriminator
+	for i := 0; i < len(key); i++ {
+		if key[i] == '|' {
+			return key[:i]
+		}
+	}
+	return key
+}
+
+func tqMatchesClient(tq, clientID string) bool {
+	// tq format: notif-{channel}-{priority}-{clientID}
+	if clientID == "global" {
+		return len(tq) > 6 && tq[len(tq)-6:] == "-global"
+	}
+	return len(tq) > len(clientID) && tq[len(tq)-len(clientID):] == clientID
+}
+
+func updateClientSummary(data map[string]*WorkerClientSummary, clientID, channel, priority string, names map[string]string) {
+	if _, ok := data[clientID]; !ok {
+		name := names[clientID]
+		if name == "" && clientID == "" {
+			name = "global"
+		}
+		data[clientID] = &WorkerClientSummary{
+			ClientID:   clientID,
+			ClientName: name,
+			ByPriority: make(map[string]int),
+			ByChannel:  make(map[string]int),
+		}
+	}
+	data[clientID].Total++
+	data[clientID].ByPriority[priority]++
+	data[clientID].ByChannel[channel]++
+}
+
+// parseTaskQueue extracts clientID, channel, and priority from a task queue name.
+// Task queue format: notif-{channel}-{priority}-{clientID}
+// Returns (clientID, channelStr, priorityStr).
+func parseTaskQueue(tq string) (string, string, string) {
+	// notif-email-high-abc123
+	for _, ch := range AllChannels() {
+		for _, p := range AllPriorities() {
+			prefix := fmt.Sprintf("notif-%s-%s-", ch, p)
+			if len(tq) >= len(prefix) && tq[:len(prefix)] == prefix {
+				return tq[len(prefix):], string(ch), string(p)
+			}
+		}
+	}
+	return "", "", ""
+}
+
+// exportParallelismMetrics exports the actual running worker count per group
+// to the autoscaler's Prometheus metric. Must hold m.mu.
+func (m *WorkerManager) exportParallelismMetrics() {
+	// Reset and repopulate from current worker groups.
+	autoscaler.WorkerParallelismActual.Reset()
+
+	counts := make(map[string]int)
+	for _, group := range m.groups {
+		clientID, ch, pr := parseTaskQueue(group.taskQueue)
+		if ch == "" || pr == "" {
+			continue
+		}
+		key := clientID + "|" + ch + "|" + pr
+		counts[key] += len(group.workers)
+	}
+
+	for key, count := range counts {
+		parts := splitThree(key)
+		if len(parts) != 3 {
+			continue
+		}
+		autoscaler.WorkerParallelismActual.WithLabelValues(parts[0], parts[1], parts[2]).Set(float64(count))
+	}
+}
+
+func splitThree(s string) []string {
+	out := make([]string, 0, 3)
+	start := 0
+	for i := 0; i < len(s) && len(out) < 2; i++ {
+		if s[i] == '|' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	if start <= len(s) {
+		out = append(out, s[start:])
+	}
+	return out
 }

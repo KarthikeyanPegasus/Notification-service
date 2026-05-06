@@ -20,10 +20,45 @@ func NewGovernanceHandler(repo *repository.GovernanceRepository, log *zap.Logger
 	return &GovernanceHandler{repo: repo, log: log}
 }
 
+// callerID extracts the authenticated user's identifier from the request context.
+func callerID(c *gin.Context) string {
+	if id := c.GetString("caller_id"); id != "" {
+		return id
+	}
+	claims, _ := c.Get("claims")
+	if m, ok := claims.(map[string]any); ok {
+		if sub, _ := m["sub"].(string); sub != "" {
+			return sub
+		}
+	}
+	return ""
+}
+
+// callerRole extracts the authenticated user's role from the request context.
+func callerRole(c *gin.Context) string {
+	claims, _ := c.Get("claims")
+	if m, ok := claims.(map[string]any); ok {
+		if role, _ := m["role"].(string); role != "" {
+			return role
+		}
+	}
+	return ""
+}
+
+// isDev returns true when the caller has the dev role.
+func isDev(c *gin.Context) bool {
+	return callerRole(c) == "dev"
+}
+
 // Suppressions
 
 func (h *GovernanceHandler) ListSuppressions(c *gin.Context) {
-	list, err := h.repo.ListSuppressions(c.Request.Context())
+	var createdBy string
+	if isDev(c) {
+		createdBy = callerID(c)
+	}
+
+	list, err := h.repo.ListSuppressions(c.Request.Context(), createdBy)
 	if err != nil {
 		h.log.Error("failed to list suppressions", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -45,6 +80,7 @@ func (h *GovernanceHandler) AddSuppression(c *gin.Context) {
 		Value:     req.Value,
 		Reason:    req.Reason,
 		Metadata:  req.Metadata,
+		CreatedBy: callerID(c),
 		CreatedAt: time.Now(),
 	}
 
@@ -64,7 +100,12 @@ func (h *GovernanceHandler) DeleteSuppression(c *gin.Context) {
 		return
 	}
 
-	if err := h.repo.DeleteSuppression(c.Request.Context(), id); err != nil {
+	var createdBy string
+	if isDev(c) {
+		createdBy = callerID(c)
+	}
+
+	if err := h.repo.DeleteSuppression(c.Request.Context(), id, createdBy); err != nil {
 		h.log.Error("failed to delete suppression", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
@@ -76,7 +117,12 @@ func (h *GovernanceHandler) DeleteSuppression(c *gin.Context) {
 // Opt-outs
 
 func (h *GovernanceHandler) ListOptOuts(c *gin.Context) {
-	list, err := h.repo.ListOptOuts(c.Request.Context())
+	var createdBy string
+	if isDev(c) {
+		createdBy = callerID(c)
+	}
+
+	list, err := h.repo.ListOptOuts(c.Request.Context(), createdBy)
 	if err != nil {
 		h.log.Error("failed to list opt-outs", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -98,6 +144,7 @@ func (h *GovernanceHandler) AddOptOut(c *gin.Context) {
 		Channel:   req.Channel,
 		Reason:    req.Reason,
 		Source:    req.Source,
+		CreatedBy: callerID(c),
 		CreatedAt: time.Now(),
 	}
 
@@ -117,7 +164,12 @@ func (h *GovernanceHandler) DeleteOptOut(c *gin.Context) {
 		return
 	}
 
-	if err := h.repo.DeleteOptOut(c.Request.Context(), id); err != nil {
+	var createdBy string
+	if isDev(c) {
+		createdBy = callerID(c)
+	}
+
+	if err := h.repo.DeleteOptOut(c.Request.Context(), id, createdBy); err != nil {
 		h.log.Error("failed to delete opt-out", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"math/big"
@@ -101,7 +102,10 @@ func (s *OTPService) Verify(ctx context.Context, userID, purpose, inputOTP strin
 		return domain.ErrTooManyAttempts
 	}
 
-	if stored != inputOTP {
+	// Constant-time comparison to prevent timing side-channel attacks
+	storedBytes := []byte(stored)
+	inputBytes := []byte(inputOTP)
+	if subtle.ConstantTimeCompare(storedBytes, inputBytes) != 1 {
 		return domain.ErrOTPInvalid
 	}
 

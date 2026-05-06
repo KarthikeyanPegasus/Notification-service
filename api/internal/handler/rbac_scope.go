@@ -170,19 +170,13 @@ func enforceAPIKeyScopeOrAssigned(c *gin.Context, users *repository.UserReposito
 		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load assignments")
 		return nil, nil, false
 	}
-	if len(ids) == 0 {
-		respondError(c, http.StatusForbidden, "FORBIDDEN", "no client assignments")
-		return nil, nil, false
-	}
+	// Empty assignments → return empty non-nil slice so callers return empty results,
+	// not a 403. nil means "admin/no-filter"; non-nil empty means "scoped to nothing".
 	out := make([]uuid.UUID, 0, len(ids))
 	for _, s := range ids {
 		if parsed, err := uuid.Parse(s); err == nil {
 			out = append(out, parsed)
 		}
-	}
-	if len(out) == 0 {
-		respondError(c, http.StatusForbidden, "FORBIDDEN", "no valid client assignments")
-		return nil, nil, false
 	}
 	return nil, out, true
 }

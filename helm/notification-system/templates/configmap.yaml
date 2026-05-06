@@ -6,14 +6,111 @@ metadata:
   labels:
     {{- include "notification-system.labels" . | nindent 4 }}
 data:
-  NS_PUBSUB_MODE: {{ .Values.config.pubsubMode | quote }}
-  NS_SERVER_PORT: {{ .Values.config.serverPort | quote }}
-  NS_DATABASE_MIGRATION_DIR: {{ .Values.config.migrationDir | quote }}
+  # ── Server ────────────────────────────────────────────────────────────────
+  NS_SERVER_MODE: {{ .Values.config.server.mode | quote }}
+  ENVIRONMENT: {{ .Values.config.environment | quote }}
+  NS_SERVER_READ_TIMEOUT: {{ .Values.config.server.readTimeout | quote }}
+  NS_SERVER_WRITE_TIMEOUT: {{ .Values.config.server.writeTimeout | quote }}
+  NS_SERVER_SHUTDOWN_TIMEOUT: {{ .Values.config.server.shutdownTimeout | quote }}
+
+  # ── Database ──────────────────────────────────────────────────────────────
+  NS_DATABASE_DSN: {{ include "notification-system.databaseDSN" . | quote }}
+  NS_DATABASE_MAX_OPEN_CONNS: {{ .Values.config.database.maxOpenConns | quote }}
+  NS_DATABASE_MAX_IDLE_CONNS: {{ .Values.config.database.maxIdleConns | quote }}
+  NS_DATABASE_CONN_MAX_LIFETIME: {{ .Values.config.database.connMaxLifetime | quote }}
+  NS_DATABASE_MIGRATION_DIR: {{ .Values.config.database.migrationDir | quote }}
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  NS_REDIS_ADDR: {{ include "notification-system.redisAddr" . | quote }}
+  NS_REDIS_DB: {{ .Values.config.redis.db | quote }}
+  {{- if .Values.redis.enabled }}
+  NS_REDIS_PASSWORD: ""
+  {{- end }}
+
+  # ── Pub/Sub ───────────────────────────────────────────────────────────────
+  NS_PUBSUB_MODE: {{ .Values.config.pubsub.mode | quote }}
+  NS_PUBSUB_KAFKA_CONSUMER_GROUP_ID: {{ .Values.config.pubsub.kafkaConsumerGroupId | quote }}
+  NS_PUBSUB_KAFKA_NUM_PARTITIONS: {{ .Values.config.pubsub.kafkaNumPartitions | quote }}
+  NS_PUBSUB_KAFKA_REPLICATION_FACTOR: {{ .Values.config.pubsub.kafkaReplicationFactor | quote }}
+  {{- $brokers := include "notification-system.kafkaBrokers" . }}
+  {{- if $brokers }}
+  NS_PUBSUB_KAFKA_BROKERS: {{ $brokers | quote }}
+  {{- end }}
+
+  # ── Workflow Engine (Temporal / Cadence) ──────────────────────────────────
   NS_CADENCE_MODE: {{ .Values.config.cadence.mode | quote }}
-  NS_CADENCE_HOST_PORT: {{ .Values.config.cadence.hostPort | quote }}
   NS_CADENCE_DOMAIN: {{ .Values.config.cadence.domain | quote }}
-  {{- with .Values.config.extra }}
-  {{- range $key, $val := . }}
-  {{ $key }}: {{ $val | quote }}
+  {{- $temporalHost := include "notification-system.temporalHostPort" . }}
+  {{- if $temporalHost }}
+  NS_CADENCE_HOST_PORT: {{ $temporalHost | quote }}
   {{- end }}
+
+  # ── Logging ───────────────────────────────────────────────────────────────
+  NS_LOG_LEVEL: {{ .Values.config.log.level | quote }}
+  NS_LOG_FORMAT: {{ .Values.config.log.format | quote }}
+
+  # ── Security ──────────────────────────────────────────────────────────────
+  NS_SECURITY_RATE_LIMIT_ENABLED: {{ .Values.config.security.rateLimitEnabled | quote }}
+  NS_SECURITY_RATE_LIMIT_RPS: {{ .Values.config.security.rateLimitRps | quote }}
+  NS_SECURITY_RATE_LIMIT_BURST: {{ .Values.config.security.rateLimitBurst | quote }}
+  NS_SECURITY_DDOS_BLOCK_THRESHOLD: {{ .Values.config.security.ddosBlockThreshold | quote }}
+  NS_SECURITY_DDOS_BLOCK_DURATION: {{ .Values.config.security.ddosBlockDuration | quote }}
+  NS_SECURITY_HEADERS_ALLOWED_ORIGINS: {{ .Values.config.security.allowedOrigins | quote }}
+  NS_SECURITY_HEADERS_ENABLE_SECURE_HEADERS: {{ .Values.config.security.enableSecureHeaders | quote }}
+  NS_SECURITY_REQUEST_MAX_BODY_SIZE_MB: {{ .Values.config.security.requestMaxBodySizeMb | quote }}
+
+  # ── Email Provider ────────────────────────────────────────────────────────
+  NS_PROVIDERS_EMAIL_PRIMARY: {{ .Values.config.providers.email.primary | quote }}
+  NS_PROVIDERS_EMAIL_DEFAULT_FROM: {{ .Values.config.providers.email.defaultFrom | quote }}
+  NS_PROVIDERS_EMAIL_ROUTING_MODE: {{ .Values.config.providers.email.routingMode | quote }}
+  NS_PROVIDERS_EMAIL_SMTP_HOST: {{ .Values.config.providers.email.smtp.host | quote }}
+  NS_PROVIDERS_EMAIL_SMTP_PORT: {{ .Values.config.providers.email.smtp.port | quote }}
+  NS_PROVIDERS_EMAIL_SES_REGION: {{ .Values.config.providers.email.ses.region | quote }}
+  {{- if .Values.config.providers.email.ses.fromName }}
+  NS_PROVIDERS_EMAIL_SES_FROM_NAME: {{ .Values.config.providers.email.ses.fromName | quote }}
   {{- end }}
+
+  # ── SMS Provider ──────────────────────────────────────────────────────────
+  NS_PROVIDERS_SMS_ROUTING_MODE: {{ .Values.config.providers.sms.routingMode | quote }}
+  NS_PROVIDERS_SMS_VONAGE_FROM: {{ .Values.config.providers.sms.vonage.from | default "NotifSvc" | quote }}
+
+  # ── Push Provider ─────────────────────────────────────────────────────────
+  NS_PROVIDERS_PUSH_ROUTING_MODE: {{ .Values.config.providers.push.routingMode | quote }}
+  NS_PROVIDERS_PUSH_APNS_SANDBOX: {{ .Values.config.providers.push.apns.sandbox | quote }}
+
+  # ── Webhook Provider ──────────────────────────────────────────────────────
+  NS_PROVIDERS_WEBHOOK_ROUTING_MODE: {{ .Values.config.providers.webhook.routingMode | quote }}
+  NS_PROVIDERS_WEBHOOK_TIMEOUT_SECONDS: {{ .Values.config.providers.webhook.timeoutSeconds | quote }}
+  NS_PROVIDERS_WEBHOOK_MAX_RETRIES: {{ .Values.config.providers.webhook.maxRetries | quote }}
+
+  # ── Slack Provider ────────────────────────────────────────────────────────
+  NS_PROVIDERS_SLACK_TIMEOUT_SECONDS: {{ .Values.config.providers.slack.timeoutSeconds | quote }}
+  {{- if .Values.config.providers.slack.defaultUsername }}
+  NS_PROVIDERS_SLACK_DEFAULT_USERNAME: {{ .Values.config.providers.slack.defaultUsername | quote }}
+  {{- end }}
+
+  # ── Admin Bootstrap ───────────────────────────────────────────────────────
+  {{- if .Values.config.admin.email }}
+  NS_ADMIN_EMAIL: {{ .Values.config.admin.email | quote }}
+  NS_ADMIN_NAME: {{ .Values.config.admin.name | quote }}
+  {{- end }}
+
+  # ── AutoScaler ────────────────────────────────────────────────────────────
+  {{- if .Values.config.autoscaler }}
+  NS_AUTOSCALER_ENABLED: {{ .Values.config.autoscaler.enabled | quote }}
+  NS_AUTOSCALER_EVALUATION_INTERVAL: {{ .Values.config.autoscaler.evaluationInterval | quote }}
+  NS_AUTOSCALER_HIGH_MTTD_THRESHOLD: {{ .Values.config.autoscaler.highMttdThreshold | quote }}
+  NS_AUTOSCALER_MEDIUM_MTTD_THRESHOLD: {{ .Values.config.autoscaler.mediumMttdThreshold | quote }}
+  NS_AUTOSCALER_LOW_MTTD_THRESHOLD: {{ .Values.config.autoscaler.lowMttdThreshold | quote }}
+  NS_AUTOSCALER_MAX_LAG_PER_WORKER: {{ .Values.config.autoscaler.maxLagPerWorker | quote }}
+  NS_AUTOSCALER_COOLDOWN_PERIOD: {{ .Values.config.autoscaler.cooldownPeriod | quote }}
+  NS_AUTOSCALER_SCALE_DOWN_FACTOR: {{ .Values.config.autoscaler.scaleDownFactor | quote }}
+  NS_AUTOSCALER_IDLE_THRESHOLD: {{ .Values.config.autoscaler.idleThreshold | quote }}
+  NS_AUTOSCALER_UNHEALTHY_THRESHOLD: {{ .Values.config.autoscaler.unhealthyThreshold | quote }}
+  NS_AUTOSCALER_GLOBAL_MAX_WORKERS: {{ .Values.config.autoscaler.globalMaxWorkers | quote }}
+  NS_AUTOSCALER_GLOBAL_MIN_WORKERS: {{ .Values.config.autoscaler.globalMinWorkers | quote }}
+  NS_AUTOSCALER_MTTD_LOOKBACK: {{ .Values.config.autoscaler.mttdLookback | quote }}
+  {{- end }}
+
+  # ── Worker internal URL (used by Worker to health-check API) ──────────────
+  NS_WORKER_INTERNAL_URL: {{ include "notification-system.workerInternalUrl" . | quote }}

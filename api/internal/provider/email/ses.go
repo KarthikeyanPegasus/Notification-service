@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,6 +24,7 @@ type SESSender struct {
 	client   *sesv2.Client
 	from     string
 	fromName string
+	replyTo  string
 	mode     string // "api" | "smtp"
 	smtpHost string
 	smtpUser string
@@ -48,30 +51,36 @@ func NewSESSender(ctx context.Context, cfg config.SESConfig) (*SESSender, error)
 		awsconfig.WithEndpointResolverWithOptions(resolver),
 	}
 
-	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
-		opts = append(opts, awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			cfg.AccessKeyID, cfg.SecretAccessKey, "",
-		)))
-	}
-
 	from := cfg.FromAddress
 	if cfg.FromName != "" {
 		from = fmt.Sprintf("%s <%s>", cfg.FromName, cfg.FromAddress)
 	}
 
+	accessKey := strings.TrimSpace(cfg.AccessKeyID)
+	secretKey := strings.TrimSpace(cfg.SecretAccessKey)
+	if secretKey == "" {
+		secretKey = strings.TrimSpace(cfg.AccessSecret)
+	}
+
+	smtpUser := strings.TrimSpace(cfg.SMTPUsername)
+	smtpPass := strings.TrimSpace(cfg.SMTPPassword)
+
 	// If API credentials are provided, use SES API mode.
 	// Otherwise, if SMTP credentials are provided, use SES SMTP mode.
-	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
-		// Proceed to API initialization below
-	} else if cfg.SMTPUsername != "" && cfg.SMTPPassword != "" {
+	if accessKey != "" && secretKey != "" {
+		opts = append(opts, awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			accessKey, secretKey, "",
+		)))
+	} else if smtpUser != "" && smtpPass != "" {
 		return &SESSender{
 			client:   nil,
 			from:     from,
 			fromName: cfg.FromName,
+			replyTo:  cfg.ReplyTo,
 			mode:     "smtp",
 			smtpHost: fmt.Sprintf("email-smtp.%s.amazonaws.com", cfg.Region),
-			smtpUser: cfg.SMTPUsername,
-			smtpPass: cfg.SMTPPassword,
+			smtpUser: smtpUser,
+			smtpPass: smtpPass,
 		}, nil
 	}
 
@@ -91,13 +100,14 @@ func NewSESSender(ctx context.Context, cfg config.SESConfig) (*SESSender, error)
 		client:   sesv2.NewFromConfig(awsCfg),
 		from:     from,
 		fromName: cfg.FromName,
+		replyTo:  cfg.ReplyTo,
 		mode:     "api",
 	}, nil
 }
 
 func (s *SESSender) ProviderName() string { return "amazon-ses" }
 
-func (s *SESSender) ValidateEmail(_ string) error { return nil }
+func (s *SESSender) ValidateEmail(email string) error { return validateEmailFormat(email) }
 
 func (s *SESSender) Send(ctx context.Context, n *domain.Notification) (domain.DeliveryResult, error) {
 	start := time.Now()
@@ -107,10 +117,29 @@ func (s *SESSender) Send(ctx context.Context, n *domain.Notification) (domain.De
 	}
 
 	if s.mode == "smtp" {
+		from := strings.TrimSpace(s.from)
+		if from == "" {
+			return domain.DeliveryResult{}, fmt.Errorf("SES SMTP: from address is empty")
+		}
+		if _, err := mail.ParseAddress(from); err != nil {
+			return domain.DeliveryResult{}, fmt.Errorf("SES SMTP: invalid from address %q: %w", from, err)
+		}
+
+		to := strings.TrimSpace(n.Recipient)
+		if to == "" {
+			return domain.DeliveryResult{}, fmt.Errorf("SES SMTP: recipient address is empty")
+		}
+		if _, err := mail.ParseAddress(to); err != nil {
+			return domain.DeliveryResult{}, fmt.Errorf("SES SMTP: invalid recipient address %q: %w", to, err)
+		}
+
 		m := gomail.NewMessage()
-		m.SetHeader("From", s.from)
-		m.SetHeader("To", n.Recipient)
+		m.SetHeader("From", from)
+		m.SetHeader("To", to)
 		m.SetHeader("Subject", n.RenderedContent.Subject)
+		if s.replyTo != "" {
+			m.SetHeader("Reply-To", s.replyTo)
+		}
 		m.SetHeader("Message-ID", fmt.Sprintf("<%s@notification-service>", uuid.New().String()))
 
 		if n.RenderedContent.HTML != "" {
@@ -167,6 +196,10 @@ func (s *SESSender) Send(ctx context.Context, n *domain.Notification) (domain.De
 				},
 			},
 		},
+	}
+
+	if s.replyTo != "" {
+		input.ReplyToAddresses = []string{s.replyTo}
 	}
 
 	output, err := s.client.SendEmail(ctx, input)

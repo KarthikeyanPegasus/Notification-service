@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"strings"
 
 	"github.com/spidey/notification-service/internal/config"
 	"github.com/spidey/notification-service/internal/provider/email"
@@ -15,28 +16,49 @@ import (
 func InitializeEmailSenders(ctx context.Context, cfg config.EmailProviderConfig) []Sender {
 	var senders []Sender
 
+	// Helper to pick from address: provider-specific > default_from
+	pickFrom := func(providerFrom string) string {
+		trimmed := strings.TrimSpace(providerFrom)
+		if trimmed != "" {
+			return trimmed
+		}
+		return strings.TrimSpace(cfg.DefaultFrom)
+	}
+
 	// Add SES if configured
-	if ses, err := email.NewSESSender(ctx, cfg.SES); err == nil && ses != nil {
+	sesCfg := cfg.SES
+	if strings.TrimSpace(sesCfg.FromAddress) == "" {
+		sesCfg.FromAddress = strings.TrimSpace(cfg.DefaultFrom)
+	}
+	if ses, err := email.NewSESSender(ctx, sesCfg); err == nil && ses != nil {
 		senders = append(senders, ses)
 	}
 
 	// Add Mailgun
-	if mailgun := email.NewMailgunSender(cfg.Mailgun); mailgun != nil {
+	mgCfg := cfg.Mailgun
+	mgCfg.From = pickFrom(mgCfg.From)
+	if mailgun := email.NewMailgunSender(mgCfg); mailgun != nil {
 		senders = append(senders, mailgun)
 	}
 
 	// Add SendGrid
-	if sendgrid := email.NewSendGridSender(cfg.SendGrid); sendgrid != nil {
+	sgCfg := cfg.SendGrid
+	sgCfg.FromEmail = pickFrom(sgCfg.FromEmail)
+	if sendgrid := email.NewSendGridSender(sgCfg); sendgrid != nil {
 		senders = append(senders, sendgrid)
 	}
 
 	// Add Postmark
-	if postmark := email.NewPostmarkSender(cfg.Postmark); postmark != nil {
+	pmCfg := cfg.Postmark
+	pmCfg.FromEmail = pickFrom(pmCfg.FromEmail)
+	if postmark := email.NewPostmarkSender(pmCfg); postmark != nil {
 		senders = append(senders, postmark)
 	}
 
 	// Add SMTP
-	if smtp := email.NewSMTPSender(cfg.SMTP); smtp != nil {
+	smtpCfg := cfg.SMTP
+	smtpCfg.From = pickFrom(smtpCfg.From)
+	if smtp := email.NewSMTPSender(smtpCfg); smtp != nil {
 		senders = append(senders, smtp)
 	}
 

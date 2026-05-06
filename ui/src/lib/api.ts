@@ -15,23 +15,40 @@ import type {
   VendorBilling,
   ScheduledStats,
   AdminOverview,
+  OrchestrationMigration,
+  VendorMigration,
+  StartVendorMigrationRequest,
+  AutoScalerConfigForm,
+  DLQEntry,
 } from '@/types'
 
-// In the browser, prefer same-origin `/v1/*` via Next.js rewrite proxy.
-// This avoids browser -> localhost networking issues in dev and simplifies CORS.
-// On the server (or in non-browser contexts), allow an explicit API base URL.
-const API_BASE_URL =
-  typeof window === 'undefined' ? process.env.NEXT_PUBLIC_API_URL ?? '' : ''
+// Prefer explicit API base URL when provided (browser + server).
+// Fallback to same-origin paths ("/v1/*") so Next.js rewrites still work.
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? '').trim()
 
 const AUTH_TOKEN_KEY = 'notifyhub-auth-token'
 
-function adminAuthHeaders(): HeadersInit {
+async function tryGetClerkToken(): Promise<string | null> {
+  // Browser path: Clerk attaches itself to window.
+  if (typeof window !== 'undefined') {
+    try {
+      const clerk: any = (window as any).Clerk
+      if (clerk?.session?.getToken) {
+        const t = await clerk.session.getToken()
+        return t ? String(t) : null
+      }
+    } catch {
+      // ignore
+    }
+    return null
+  }
+  return null
+}
+
+function adminAuthHeaders(clerkToken?: string): HeadersInit {
   const h: Record<string, string> = {}
-  const bearer =
-    (typeof window !== 'undefined' && window.localStorage.getItem(AUTH_TOKEN_KEY)) ||
-    process.env.NEXT_PUBLIC_API_BEARER
-  if (bearer) {
-    h['Authorization'] = `Bearer ${bearer}`
+  if (clerkToken) {
+    h['Authorization'] = `Bearer ${clerkToken}`
   }
   return h
 }
@@ -47,45 +64,54 @@ class ApiError extends Error {
   }
 }
 
-async function fetchJSON<T>(path: string, options?: RequestInit): Promise<T> {
-  const url = API_BASE_URL ? `${API_BASE_URL}${path}` : path
+export async function fetchJSON<T>(path: string, options?: RequestInit, clerkToken?: string): Promise<T> {
+  const baseURL = API_BASE_URL.replace(/\/$/, '')
+  const primaryURL = baseURL ? `${baseURL}${path}` : path
   const baseHeaders: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json',
   }
-  const bearer =
-    (typeof window !== 'undefined' && window.localStorage.getItem(AUTH_TOKEN_KEY)) ||
-    process.env.NEXT_PUBLIC_API_BEARER
+  // Prefer explicit token, otherwise try Clerk. No other fallback — bearer tokens
+  // must not be stored in localStorage or NEXT_PUBLIC_ env vars.
+  let bearer: string | null = clerkToken ?? null
+  if (!bearer) bearer = await tryGetClerkToken()
   if (bearer) baseHeaders['Authorization'] = `Bearer ${bearer}`
-  let res: Response
-  try {
-    res = await fetch(url, { headers: { ...baseHeaders, ...(options?.headers as any) }, ...options })
-  } catch (e) {
-    // In some dev setups, `localhost` can resolve to an address the API isn't bound to.
-    // Retry once with 127.0.0.1 as a best-effort fallback.
-    if (API_BASE_URL.includes('localhost')) {
-      const retryURL = `${API_BASE_URL.replace('localhost', '127.0.0.1')}${path}`
-      try {
-        res = await fetch(retryURL, { headers: { ...baseHeaders, ...(options?.headers as any) }, ...options })
-      } catch {
-        throw new Error(`Failed to fetch ${url}`)
-      }
-    } else if (!API_BASE_URL) {
-      throw new Error(`Failed to fetch ${path}`)
-    } else {
-      throw new Error(`Failed to fetch ${url}`)
+
+  // Try explicit API base first; on network failure, fallback to same-origin `/v1/*`
+  // so Next.js rewrites can still proxy in containerized/dev setups.
+  const candidateURLs: string[] = [primaryURL]
+  if (baseURL && typeof window !== 'undefined') {
+    if (baseURL.includes('localhost')) {
+      candidateURLs.push(`${baseURL.replace('localhost', '127.0.0.1')}${path}`)
+    }
+    if (!candidateURLs.includes(path)) {
+      candidateURLs.push(path)
     }
   }
+
+  let res: Response | null = null
+  for (const candidate of candidateURLs) {
+    try {
+      res = await fetch(candidate, { headers: { ...baseHeaders, ...(options?.headers as any) }, ...options })
+      break
+    } catch {
+      // try next candidate URL
+    }
+  }
+
+  if (!res) {
+    if (!baseURL) {
+      throw new Error(`Failed to fetch ${path}`)
+    }
+    throw new Error(`Failed to fetch ${primaryURL}`)
+  }
   if (!res.ok) {
-    // If the user's token expired, clear it and bounce to login (best-effort).
+    // If the user's legacy token expired, clear it (best-effort).
+    // With Clerk, navigation to sign-in should be handled by Clerk/AuthGuard.
     if (res.status === 401) {
       try {
         if (typeof window !== 'undefined') {
           clearAuthToken()
-          // Avoid redirect loops if already on login.
-          if (window.location?.pathname !== '/login') {
-            window.location.href = '/login'
-          }
         }
       } catch {
         // ignore
@@ -111,7 +137,13 @@ async function fetchJSON<T>(path: string, options?: RequestInit): Promise<T> {
       bodyJSON && typeof bodyJSON === 'object'
         ? String(bodyJSON.error ?? bodyJSON.message ?? '').trim()
         : ''
-    const msgFromText = !msgFromJSON ? String(bodyText ?? '').trim() : ''
+    let msgFromText = !msgFromJSON ? String(bodyText ?? '').trim() : ''
+    // Avoid dumping full HTML documents into toast/error UI.
+    if (msgFromText.startsWith('<!DOCTYPE html') || msgFromText.startsWith('<html')) {
+      msgFromText = 'Unexpected HTML response (likely wrong API URL/rewrite).'
+    } else if (msgFromText.length > 500) {
+      msgFromText = `${msgFromText.slice(0, 500)}...`
+    }
     const detail = msgFromJSON || msgFromText
     const base = `HTTP ${res.status}: ${res.statusText || 'Request failed'}`
     throw new ApiError(res.status, detail ? `${base} — ${detail}` : base, bodyJSON ?? bodyText)
@@ -271,6 +303,42 @@ export async function deleteVendorConfigScoped(vendorType: string, apiKeyId?: st
   })
 }
 
+// ── Vendor Migrations ────────────────────────────────────────────────────────
+
+export async function startVendorMigration(
+  payload: StartVendorMigrationRequest,
+  apiKeyId?: string,
+): Promise<VendorMigration> {
+  const q = apiKeyId ? `?api_key_id=${encodeURIComponent(apiKeyId)}` : ''
+  return fetchJSON<VendorMigration>(`/v1/admin/config/vendors/migrations${q}`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function listVendorMigrations(
+  opts?: { apiKeyId?: string; channel?: string; status?: string },
+): Promise<VendorMigration[]> {
+  const params = new URLSearchParams()
+  if (opts?.apiKeyId) params.set('api_key_id', opts.apiKeyId)
+  if (opts?.channel)  params.set('channel', opts.channel)
+  if (opts?.status)   params.set('status', opts.status)
+  const q = params.toString() ? `?${params.toString()}` : ''
+  return fetchJSON<VendorMigration[]>(`/v1/admin/config/vendors/migrations${q}`)
+}
+
+export async function completeVendorMigration(id: string): Promise<{ message: string }> {
+  return fetchJSON<{ message: string }>(`/v1/admin/config/vendors/migrations/${id}/complete`, {
+    method: 'POST',
+  })
+}
+
+export async function rollbackVendorMigration(id: string): Promise<{ message: string }> {
+  return fetchJSON<{ message: string }>(`/v1/admin/config/vendors/migrations/${id}/rollback`, {
+    method: 'POST',
+  })
+}
+
 export async function getVendorRateLimitsScoped(apiKeyId?: string): Promise<VendorRateLimit[]> {
   const q = apiKeyId ? `?api_key_id=${encodeURIComponent(apiKeyId)}` : ''
   return fetchJSON<VendorRateLimit[]>(`/v1/admin/config/rate-limits${q}`, {
@@ -347,6 +415,14 @@ export async function listMyClients(): Promise<ApiClientKey[]> {
   return fetchJSON<ApiClientKey[]>('/v1/me/clients')
 }
 
+// Create a sandbox client for the current dev user (auto-assigned, max 1).
+export async function createMyClient(name: string): Promise<CreateApiKeyResponse> {
+  return fetchJSON<CreateApiKeyResponse>('/v1/me/clients', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
+}
+
 export async function sendVendorTest(
   vendorType: string,
   payload: { channel: 'sms' | 'email' | 'slack'; recipient: string; body: string; subject?: string; slack_channel?: string },
@@ -370,31 +446,21 @@ export async function listApiKeys(): Promise<ApiClientKey[]> {
   })
 }
 
-export interface LoginResponse {
-  token: string
-  user: { id: string; email: string; name: string; role: string }
+// ── Clerk token helpers ───────────────────────────────────────────────
+// These are used as fallbacks; prefer Clerk's useAuth() hook for new code.
+
+export function getAuthToken(): string | null {
+  if (typeof window === 'undefined') return null
+  return window.localStorage.getItem(AUTH_TOKEN_KEY)
 }
 
-export async function login(email: string, password: string): Promise<LoginResponse> {
-  return fetchJSON<LoginResponse>('/v1/auth/login', {
-    method: 'POST',
-    body: JSON.stringify({ email, password }),
-  })
-}
-
-export function setAuthToken(token: string) {
+export function clearAuthToken() {
   if (typeof window === 'undefined') return
-  window.localStorage.setItem(AUTH_TOKEN_KEY, token)
+  window.localStorage.removeItem(AUTH_TOKEN_KEY)
+  window.localStorage.removeItem(AUTH_USER_KEY)
 }
 
-const AUTH_USER_KEY = 'notifyhub-auth-user'
-
-export function setAuthUser(user: LoginResponse['user']) {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user))
-}
-
-export function getAuthUser(): LoginResponse['user'] | null {
+export function getAuthUser(): { id: string; email: string; name: string; role: string } | null {
   if (typeof window === 'undefined') return null
   const raw = window.localStorage.getItem(AUTH_USER_KEY)
   if (!raw) return null
@@ -405,16 +471,23 @@ export function getAuthUser(): LoginResponse['user'] | null {
   }
 }
 
-export function clearAuthToken() {
+export function setAuthToken(token: string) {
   if (typeof window === 'undefined') return
-  window.localStorage.removeItem(AUTH_TOKEN_KEY)
-  window.localStorage.removeItem(AUTH_USER_KEY)
+  window.localStorage.setItem(AUTH_TOKEN_KEY, token)
 }
 
-export function getAuthToken(): string | null {
-  if (typeof window === 'undefined') return null
-  return window.localStorage.getItem(AUTH_TOKEN_KEY)
+export function setAuthUser(user: { id: string; email: string; name: string; role: string }) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user))
 }
+
+// Legacy login function intentionally disabled.
+// Authentication is managed by Clerk; backend /v1/auth/login is removed.
+export async function login(_email: string, _password: string): Promise<{ token: string; user: { id: string; email: string; name: string; role: string } }> {
+  throw new Error('Legacy login is no longer supported. Use Clerk authentication flow instead.')
+}
+
+const AUTH_USER_KEY = 'notifyhub-auth-user'
 
 export async function createApiKey(name: string): Promise<CreateApiKeyResponse> {
   return fetchJSON<CreateApiKeyResponse>('/v1/admin/api-keys', {
@@ -471,6 +544,45 @@ export async function addSuppression(type: 'email' | 'sms' | 'push' | 'slack' | 
   })
 }
 
+export async function getSuppressions(): Promise<any[]> {
+  return fetchJSON<any[]>('/v1/governance/suppressions')
+}
+
+export async function deleteSuppression(id: string): Promise<void> {
+  await fetchJSON<void>(`/v1/governance/suppressions/${id}`, { method: 'DELETE' })
+}
+
+export async function createSuppression(payload: {
+  type: 'email' | 'sms' | 'push' | 'slack' | 'webhook'
+  value: string
+  reason?: string
+}): Promise<any> {
+  return fetchJSON<any>('/v1/governance/suppressions', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function getOptOuts(): Promise<any[]> {
+  return fetchJSON<any[]>('/v1/governance/opt-outs')
+}
+
+export async function deleteOptOut(id: string): Promise<void> {
+  await fetchJSON<void>(`/v1/governance/opt-outs/${id}`, { method: 'DELETE' })
+}
+
+export async function createOptOut(payload: {
+  user_id: string
+  channel: string
+  reason?: string
+  source: string
+}): Promise<any> {
+  return fetchJSON<any>('/v1/governance/opt-outs', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export async function getVendorHealth(apiKeyId?: string): Promise<VendorMetric[]> {
   const q = apiKeyId ? `?api_key_id=${encodeURIComponent(apiKeyId)}` : ''
   return fetchJSON<VendorMetric[]>(`/v1/reports/vendors${q}`)
@@ -491,6 +603,69 @@ export async function getScheduledStats(filters: ReportFilters, apiKeyId?: strin
 }
 
 
-export async function getAdminOverview(): Promise<AdminOverview> {
-  return fetchJSON<AdminOverview>('/v1/admin/overview')
+// ── Dead-Letter Queue ────────────────────────────────────────────────────────
+
+export async function getDLQEntries(page?: number, unreplayedOnly?: boolean): Promise<{ data: DLQEntry[]; total: number; page: number; page_size: number }> {
+  const params = new URLSearchParams()
+  if (page) params.set('page', String(page))
+  if (unreplayedOnly) params.set('unreplayed', 'true')
+  const q = params.toString() ? `?${params.toString()}` : ''
+  return fetchJSON(`/v1/admin/dlq${q}`)
+}
+
+export async function getDLQStats(): Promise<{ total_entries: number; pending_replay: number; replayed_entries: number }> {
+  return fetchJSON('/v1/admin/dlq/stats')
+}
+
+export async function getDLQEntry(id: string): Promise<DLQEntry> {
+  return fetchJSON(`/v1/admin/dlq/${id}`)
+}
+
+export async function replayDLQEntry(id: string): Promise<{ dlq_id: string; notification_id?: string; status: string }> {
+  return fetchJSON(`/v1/admin/dlq/${id}/replay`, { method: 'POST' })
+}
+
+export async function replayAllDLQ(): Promise<{ total: number; replayed: number; errors: number; status: string }> {
+  return fetchJSON('/v1/admin/dlq/replay-all', { method: 'POST' })
+}
+
+export async function getAdminOverview(window?: string): Promise<AdminOverview> {
+  const q = window ? `?window=${encodeURIComponent(window)}` : ''
+  return fetchJSON<AdminOverview>(`/v1/admin/overview${q}`)
+}
+
+export async function listMigrations(activeOnly?: boolean): Promise<OrchestrationMigration[]> {
+  const q = activeOnly ? '?active_only=true' : ''
+  return fetchJSON<OrchestrationMigration[]>(`/v1/admin/migrations${q}`)
+}
+
+export async function cancelMigration(id: string): Promise<{ message: string }> {
+  return fetchJSON<{ message: string }>(`/v1/admin/migrations/${id}/cancel`, { method: 'POST' })
+}
+
+export async function getAutoScalerConfig(): Promise<AutoScalerConfigForm> {
+  return fetchJSON<AutoScalerConfigForm>('/v1/admin/config/autoscaler')
+}
+
+export async function updateAutoScalerConfig(cfg: Partial<AutoScalerConfigForm>): Promise<{ message: string; config: AutoScalerConfigForm }> {
+  return fetchJSON<{ message: string; config: AutoScalerConfigForm }>('/v1/admin/config/autoscaler', {
+    method: 'PUT',
+    body: JSON.stringify(cfg),
+  })
+}
+
+// API Docs visibility
+export async function getApiDocsVisibility(): Promise<{ hidden_endpoints: string[] }> {
+  try {
+    return await fetchJSON<{ hidden_endpoints: string[] }>('/v1/docs/visibility')
+  } catch {
+    return { hidden_endpoints: [] }
+  }
+}
+
+export async function setApiDocsVisibility(hiddenEndpoints: string[]): Promise<void> {
+  await fetchJSON('/v1/admin/config/vendors/api_docs_visibility', {
+    method: 'PUT',
+    body: JSON.stringify({ config: { hidden_endpoints: hiddenEndpoints } }),
+  })
 }

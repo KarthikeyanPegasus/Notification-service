@@ -100,7 +100,6 @@ export default function DashboardPage() {
   // Determine connected channels
   const connectedChannels = useMemo(() => {
     const set = new Set<Channel>()
-    set.add('websocket') // Always "connected" as internal channel
     configs.forEach((c) => {
       if (c.is_active) {
         const chan = VENDOR_TO_CHANNEL[c.vendor_type]
@@ -136,7 +135,8 @@ export default function DashboardPage() {
     }
 
     return {
-      total_sent: totals.sent,
+      triggered: totals.total,
+      succeeded: totals.delivered + totals.sent,
       success_rate: totals.total > 0 ? totals.delivered / totals.total : 0,
       failed: totals.failed,
       pending: recentData.filter((n) => n.status?.toLowerCase() === 'pending').length,
@@ -212,24 +212,30 @@ export default function DashboardPage() {
       {isLoadingKPIs ? (
         <KPISkeleton />
       ) : (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
           <KpiCard
-            title="Total Sent (24h)"
-            value={kpis ? formatNumber(kpis.total_sent) : '—'}
-            description="SENT + DELIVERED"
-            icon={Send}
+            title="Triggered"
+            value={kpis ? formatNumber(kpis.triggered) : '—'}
+            description="Total requests"
+            icon={Zap}
+          />
+          <KpiCard
+            title="Succeeded"
+            value={kpis ? formatNumber(kpis.succeeded) : '—'}
+            description="Sent + Delivered"
+            icon={CheckCircle2}
+          />
+          <KpiCard
+            title="Failed"
+            value={kpis ? formatNumber(kpis.failed) : '—'}
+            description="Delivery errors"
+            icon={XCircle}
           />
           <KpiCard
             title="Success Rate"
             value={kpis ? formatPercent(kpis.success_rate) : '—'}
             description="Delivered / total"
             icon={CheckCircle2}
-          />
-          <KpiCard
-            title="Failed"
-            value={kpis ? formatNumber(kpis.failed) : '—'}
-            description="Last 24 hours"
-            icon={XCircle}
           />
           <KpiCard
             title="Pending"

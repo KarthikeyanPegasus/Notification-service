@@ -9,6 +9,8 @@ import (
 
 	"github.com/spidey/notification-service/internal/cache"
 	"github.com/spidey/notification-service/internal/domain"
+	"github.com/spidey/notification-service/internal/repository"
+	"go.uber.org/zap"
 )
 
 const (
@@ -16,38 +18,69 @@ const (
 )
 
 // PreferencesService manages user notification preferences.
-// Preferences are persisted in Redis (acting as primary store for this fast path).
-// A production system would use Firestore/DynamoDB as primary with Redis as cache.
+// PostgreSQL is the primary store; Redis is used as a read cache for fast access.
 type PreferencesService struct {
-	cache *cache.Client
+	dbRepo *repository.UserPreferencesRepository
+	cache   *cache.Client
+	log     *zap.Logger
 }
 
-func NewPreferencesService(cacheClient *cache.Client) *PreferencesService {
-	return &PreferencesService{cache: cacheClient}
+func NewPreferencesService(dbRepo *repository.UserPreferencesRepository, cacheClient *cache.Client, log *zap.Logger) *PreferencesService {
+	return &PreferencesService{dbRepo: dbRepo, cache: cacheClient, log: log}
 }
 
 func prefsKey(userID string) string {
 	return fmt.Sprintf("prefs:user:%s", userID)
 }
 
-// Get returns user preferences. Returns permissive defaults if not set.
+// Get returns user preferences. Falls back to DB on cache miss. Returns permissive defaults if not set.
 func (s *PreferencesService) Get(ctx context.Context, userID string) (*domain.UserPreferences, error) {
+	// Try cache first
 	var prefs domain.UserPreferences
-	if err := s.cache.Get(ctx, prefsKey(userID), &prefs); err != nil {
-		if !errors.Is(err, cache.ErrCacheMiss) {
-			return nil, fmt.Errorf("getting preferences for %s: %w", userID, err)
-		}
-		// Default: all channels enabled, no DND
-		return &domain.UserPreferences{
-			UserID:    userID,
-			Channels:  map[domain.Channel]bool{},
-			UpdatedAt: time.Now(),
-		}, nil
+	if err := s.cache.Get(ctx, prefsKey(userID), &prefs); err == nil {
+		return &prefs, nil
+	} else if !errors.Is(err, cache.ErrCacheMiss) {
+		// Real cache failure — log a warning but continue to DB
+		s.log.Warn("preferences cache fetch failed, falling back to DB",
+			zap.String("user_id", userID),
+			zap.Error(err),
+		)
 	}
-	return &prefs, nil
+
+	// Cache miss or error — fall back to PostgreSQL
+	if s.dbRepo != nil {
+		dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		dbPrefs, err := s.dbRepo.Get(dbCtx, userID)
+		if err != nil {
+			s.log.Warn("preferences DB fetch failed, using permissive defaults (fail-open)",
+				zap.String("user_id", userID),
+				zap.Error(err),
+			)
+			return &domain.UserPreferences{
+				UserID:    userID,
+				Channels:  map[domain.Channel]bool{},
+				UpdatedAt: time.Now(),
+			}, nil
+		}
+		if dbPrefs != nil {
+			// Hydrate cache asynchronously
+			if data, err := json.Marshal(dbPrefs); err == nil {
+				_ = s.cache.Set(context.Background(), prefsKey(userID), data, prefsCacheTTL)
+			}
+			return dbPrefs, nil
+		}
+	}
+
+	// No preferences found — return permissive defaults
+	return &domain.UserPreferences{
+		UserID:    userID,
+		Channels:  map[domain.Channel]bool{},
+		UpdatedAt: time.Now(),
+	}, nil
 }
 
-// Set saves user preferences.
+// Set saves user preferences to both PostgreSQL (primary) and Redis (cache).
 func (s *PreferencesService) Set(ctx context.Context, userID string, req *domain.UpdatePreferencesRequest) error {
 	existing, err := s.Get(ctx, userID)
 	if err != nil {
@@ -69,12 +102,21 @@ func (s *PreferencesService) Set(ctx context.Context, userID string, req *domain
 	existing.UserID = userID
 	existing.UpdatedAt = time.Now()
 
+	// Write to PostgreSQL (primary store)
+	if s.dbRepo != nil {
+		storeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := s.dbRepo.Upsert(storeCtx, userID, existing); err != nil {
+			return fmt.Errorf("persisting preferences to DB: %w", err)
+		}
+	}
+
+	// Write to Redis (cache)
 	data, err := json.Marshal(existing)
 	if err != nil {
 		return fmt.Errorf("marshalling preferences: %w", err)
 	}
-
-	return s.cache.Set(ctx, prefsKey(userID), data, 0) // no TTL — persists until changed
+	return s.cache.Set(ctx, prefsKey(userID), data, prefsCacheTTL)
 }
 
 // IsInDND checks if the current time falls within the user's DND window.

@@ -28,6 +28,7 @@ type SMSWorker struct {
 
 func NewSMSWorker(
 	subscriber pubsub.Subscriber,
+	publisher pubsub.Publisher,
 	senders []provider.Sender,
 	notifRepo *repository.NotificationRepository,
 	attemptRepo *repository.AttemptRepository,
@@ -47,7 +48,7 @@ func NewSMSWorker(
 	return &SMSWorker{
 		base: newBaseWorker(
 			domain.ChannelSMS, subKey,
-			subscriber, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
+			subscriber, publisher, notifRepo, attemptRepo, eventRepo, govRepo, vendorRepo, cfg, registry, log, opts...,
 		),
 		senders: senders,
 	}

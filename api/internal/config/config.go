@@ -9,21 +9,29 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig
-	Database  DatabaseConfig
-	Redis     RedisConfig
-	PubSub    PubSubConfig
-	JWT       JWTConfig
-	Admin     AdminBootstrapConfig `mapstructure:"admin"`
-	Cadence   CadenceConfig
-	Providers ProviderConfig
-	Log       LogConfig
-	Security  SecurityConfig
-	Worker    WorkerConfig `mapstructure:"worker"`
+	Server     ServerConfig
+	Database   DatabaseConfig
+	Redis      RedisConfig
+	PubSub     PubSubConfig
+	JWT        JWTConfig
+	Clerk      ClerkConfig
+	Admin      AdminBootstrapConfig `mapstructure:"admin"`
+	Cadence    CadenceConfig
+	Providers  ProviderConfig
+	Log        LogConfig
+	Security   SecurityConfig
+	Worker     WorkerConfig           `mapstructure:"worker"`
+	AutoScaler AutoScalerConfig      `mapstructure:"autoscaler"`
 }
 
 // AdminBootstrapConfig bootstraps an initial admin account on startup.
 // If Email and Password are set, the API will ensure the admin user exists.
+type ClerkConfig struct {
+	SecretKey     string `mapstructure:"secret_key"`
+	WebhookSecret string `mapstructure:"webhook_secret"`
+	JWKSURL       string `mapstructure:"jwks_url"`
+}
+
 type AdminBootstrapConfig struct {
 	Email    string `mapstructure:"email"`
 	Name     string `mapstructure:"name"`
@@ -33,11 +41,25 @@ type AdminBootstrapConfig struct {
 type SecurityConfig struct {
 	// VendorConfigEncryptionKey is used to encrypt vendor_configs.config_json at rest.
 	// Provide as base64 (recommended) or raw 32-byte string via NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY.
-	VendorConfigEncryptionKey string `mapstructure:"vendor_config_encryption_key"`
-	RateLimit RateLimitConfig `mapstructure:"rate_limit"`
-	DDoS      DDoSConfig      `mapstructure:"ddos"`
-	Headers   HeadersConfig   `mapstructure:"headers"`
-	Request   RequestConfig   `mapstructure:"request"`
+	VendorConfigEncryptionKey string          `mapstructure:"vendor_config_encryption_key"`
+	RateLimit                 RateLimitConfig `mapstructure:"rate_limit"`
+	DDoS                      DDoSConfig      `mapstructure:"ddos"`
+	Headers                   HeadersConfig   `mapstructure:"headers"`
+	Request                   RequestConfig   `mapstructure:"request"`
+	SpamAssassin              SpamAssassinConfig   `mapstructure:"spam_assassin"`
+	ContentSecurity           ContentSecurityConfig `mapstructure:"content_security"`
+}
+
+type SpamAssassinConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Host    string `mapstructure:"host"`
+	Port    int    `mapstructure:"port"`
+}
+
+type ContentSecurityConfig struct {
+	Enabled      bool     `mapstructure:"enabled"`
+	SussyWords   []string `mapstructure:"sussy_words"`
+	BlockedLinks []string `mapstructure:"blocked_links"`
 }
 
 type RateLimitConfig struct {
@@ -104,13 +126,49 @@ type KafkaConfig struct {
 	ReplicationFactor int      `mapstructure:"replication_factor"`
 }
 
+// AutoScalerConfig controls MTTD-based and Kafka-lag-based worker autoscaling.
+type AutoScalerConfig struct {
+	Enabled            bool          `mapstructure:"enabled"`
+	EvaluationInterval time.Duration `mapstructure:"evaluation_interval"`
+
+	HighMTTDThreshold   time.Duration `mapstructure:"high_mttd_threshold"`
+	MediumMTTDThreshold time.Duration `mapstructure:"medium_mttd_threshold"`
+	LowMTTDThreshold    time.Duration `mapstructure:"low_mttd_threshold"`
+
+	MaxLagPerWorker int `mapstructure:"max_lag_per_worker"`
+
+	CooldownPeriod    time.Duration `mapstructure:"cooldown_period"`
+	ScaleDownFactor   float64       `mapstructure:"scale_down_factor"`
+	IdleThreshold     time.Duration `mapstructure:"idle_threshold"`
+	UnhealthyThreshold int          `mapstructure:"unhealthy_threshold"`
+
+	GlobalMaxWorkers int           `mapstructure:"global_max_workers"`
+	GlobalMinWorkers int           `mapstructure:"global_min_workers"`
+	MTTDLookback     time.Duration `mapstructure:"mttd_lookback"`
+}
+
+// SlaMsForPriority returns the MTTD threshold in milliseconds for the given
+// priority, respecting any per-priority overrides in the config.
+func (c *AutoScalerConfig) SlaMsForPriority(priority string) float64 {
+	switch priority {
+	case "high":
+		return c.HighMTTDThreshold.Seconds() * 1000
+	case "medium":
+		return c.MediumMTTDThreshold.Seconds() * 1000
+	case "low":
+		return c.LowMTTDThreshold.Seconds() * 1000
+	default:
+		return c.LowMTTDThreshold.Seconds() * 1000
+	}
+}
+
 // WorkerConfig identifies a single worker instance in container-per-worker mode.
 // These are set via environment variables (NS_WORKER_*) when the worker-manager
 // spawns a dedicated container per channel × priority × vendor × client.
 type WorkerConfig struct {
-	Channel  string `mapstructure:"channel"`  // email | sms | push | webhook | slack | websocket
-	Priority string `mapstructure:"priority"` // high | medium | low
-	Vendor   string `mapstructure:"vendor"`   // optional vendor name filter
+	Channel  string `mapstructure:"channel"`   // email | sms | push | webhook | slack | websocket
+	Priority string `mapstructure:"priority"`  // high | medium | low
+	Vendor   string `mapstructure:"vendor"`    // optional vendor name filter
 	ClientID string `mapstructure:"client_id"` // optional api_key_id scope
 }
 
@@ -128,15 +186,15 @@ type CadenceConfig struct {
 }
 
 type ProviderConfig struct {
-	Email        EmailProviderConfig
-	EmailRouting RoutingConfig `mapstructure:"email_routing" json:"email_routing"`
-	SMS          SMSProviderConfig
-	SMSRouting   RoutingConfig `mapstructure:"sms_routing" json:"sms_routing"`
-	Push         PushProviderConfig
-	PushRouting  RoutingConfig `mapstructure:"push_routing" json:"push_routing"`
+	Email          EmailProviderConfig
+	EmailRouting   RoutingConfig `mapstructure:"email_routing" json:"email_routing"`
+	SMS            SMSProviderConfig
+	SMSRouting     RoutingConfig `mapstructure:"sms_routing" json:"sms_routing"`
+	Push           PushProviderConfig
+	PushRouting    RoutingConfig `mapstructure:"push_routing" json:"push_routing"`
 	WebhookRouting RoutingConfig `mapstructure:"webhook_routing" json:"webhook_routing"`
-	Webhook      WebhookProviderConfig
-	Slack        SlackProviderConfig `mapstructure:"slack" json:"slack"`
+	Webhook        WebhookProviderConfig
+	Slack          SlackProviderConfig `mapstructure:"slack" json:"slack"`
 
 	// Webhook-based “social” vendors (used by webhook worker routing / forced-vendor tests).
 	Discord  DiscordConfig  `mapstructure:"discord" json:"discord"`
@@ -148,10 +206,10 @@ type ProviderConfig struct {
 type SlackProviderConfig struct {
 	// WebhookURL is the legacy single-webhook configuration.
 	// Prefer Channels for multi-channel Slack delivery.
-	WebhookURL      string `mapstructure:"webhook_url" json:"webhook_url"`
+	WebhookURL      string               `mapstructure:"webhook_url" json:"webhook_url"`
 	Channels        []SlackChannelConfig `mapstructure:"channels" json:"channels"`
-	TimeoutSeconds  int    `mapstructure:"timeout_seconds" json:"timeout_seconds"`
-	DefaultUsername string `mapstructure:"default_username" json:"default_username"`
+	TimeoutSeconds  int                  `mapstructure:"timeout_seconds" json:"timeout_seconds"`
+	DefaultUsername string               `mapstructure:"default_username" json:"default_username"`
 }
 
 type SlackChannelConfig struct {
@@ -189,17 +247,18 @@ type RoutingConfig struct {
 
 type EmailProviderConfig struct {
 	// Primary provider: ses | mailgun | smtp
-	Primary string        `mapstructure:"primary" json:"primary"`
-	SES     SESConfig     `mapstructure:"ses"`
-	Mailgun MailgunConfig `mapstructure:"mailgun"`
+	Primary     string         `mapstructure:"primary" json:"primary"`
+	DefaultFrom string         `mapstructure:"default_from" json:"default_from"`
+	SES         SESConfig      `mapstructure:"ses"`
+	Mailgun  MailgunConfig  `mapstructure:"mailgun"`
 	SendGrid SendGridConfig `mapstructure:"sendgrid" json:"sendgrid"`
 	Postmark PostmarkConfig `mapstructure:"postmark" json:"postmark"`
-	SMTP    SMTPConfig    `mapstructure:"smtp"`
+	SMTP     SMTPConfig     `mapstructure:"smtp"`
 }
 
 type SESConfig struct {
-	Region          string `mapstructure:"region" json:"region"`
-	AccessKeyID     string `mapstructure:"access_key_id" json:"access_key_id"`
+	Region      string `mapstructure:"region" json:"region"`
+	AccessKeyID string `mapstructure:"access_key_id" json:"access_key_id"`
 	// AccessSecret is an alias for SecretAccessKey (used by some UIs/configs).
 	AccessSecret    string `mapstructure:"access_secret" json:"access_secret"`
 	SecretAccessKey string `mapstructure:"secret_access_key" json:"secret_access_key"`
@@ -208,19 +267,22 @@ type SESConfig struct {
 	SMTPPassword    string `mapstructure:"smtp_password" json:"smtp_password"`
 	FromAddress     string `mapstructure:"from_address" json:"from_address"`
 	FromName        string `mapstructure:"from_name" json:"from_name"`
+	ReplyTo         string `mapstructure:"reply_to" json:"reply_to"`
 }
 
 type MailgunConfig struct {
-	Domain           string `mapstructure:"domain" json:"domain"`
-	APIKey           string `mapstructure:"api_key" json:"api_key"`
-	From             string `mapstructure:"from" json:"from"`
+	Domain            string `mapstructure:"domain" json:"domain"`
+	APIKey            string `mapstructure:"api_key" json:"api_key"`
+	From              string `mapstructure:"from" json:"from"`
+	ReplyTo           string `mapstructure:"reply_to" json:"reply_to"`
 	WebhookSigningKey string `mapstructure:"webhook_signing_key" json:"webhook_signing_key"`
 }
 
 type SendGridConfig struct {
-	APIKey   string `mapstructure:"api_key" json:"api_key"`
+	APIKey    string `mapstructure:"api_key" json:"api_key"`
 	FromEmail string `mapstructure:"from_email" json:"from_email"`
 	FromName  string `mapstructure:"from_name" json:"from_name"`
+	ReplyTo   string `mapstructure:"reply_to" json:"reply_to"`
 }
 
 // Postmark uses a Server API Token for sending.
@@ -228,21 +290,23 @@ type PostmarkConfig struct {
 	ServerToken string `mapstructure:"server_token" json:"server_token"`
 	FromEmail   string `mapstructure:"from_email" json:"from_email"`
 	FromName    string `mapstructure:"from_name" json:"from_name"`
+	ReplyTo     string `mapstructure:"reply_to" json:"reply_to"`
 }
 
 type SMTPConfig struct {
-	Host     string `mapstructure:"host"`
-	Port     int    `mapstructure:"port"`
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
-	From     string `mapstructure:"from"`
+	Host     string `mapstructure:"host" json:"host"`
+	Port     int    `mapstructure:"port" json:"port"`
+	Username string `mapstructure:"username" json:"username"`
+	Password string `mapstructure:"password" json:"password"`
+	From     string `mapstructure:"from" json:"from"`
+	ReplyTo  string `mapstructure:"reply_to" json:"reply_to"`
 }
 
 type SMSProviderConfig struct {
-	Primary     string           `mapstructure:"primary"` // twilio | plivo | vonage | messagebird
-	Twilio      TwilioConfig     `mapstructure:"twilio"`
-	Plivo       PlivoConfig      `mapstructure:"plivo"`
-	Vonage      VonageConfig     `mapstructure:"vonage"`
+	Primary     string            `mapstructure:"primary"` // twilio | plivo | vonage | messagebird
+	Twilio      TwilioConfig      `mapstructure:"twilio"`
+	Plivo       PlivoConfig       `mapstructure:"plivo"`
+	Vonage      VonageConfig      `mapstructure:"vonage"`
 	MessageBird MessageBirdConfig `mapstructure:"messagebird" json:"messagebird"`
 }
 
@@ -284,7 +348,7 @@ type FCMConfig struct {
 
 // OneSignal supports App-level REST API keys.
 type OneSignalConfig struct {
-	AppID     string `mapstructure:"app_id" json:"app_id"`
+	AppID      string `mapstructure:"app_id" json:"app_id"`
 	RestAPIKey string `mapstructure:"rest_api_key" json:"rest_api_key"`
 }
 
@@ -402,18 +466,20 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("pubsub.kafka.num_partitions", 3)
 	v.SetDefault("pubsub.kafka.replication_factor", 1)
 
-	v.SetDefault("cadence.mode", "temporal")
-	v.SetDefault("cadence.host_port", "localhost:7233")
-	v.SetDefault("cadence.domain", "default")
+	v.SetDefault("cadence.mode", "standalone")
+	v.SetDefault("cadence.host_port", "")
+	v.SetDefault("cadence.domain", "")
 
 	v.SetDefault("jwt.expiry", "24h")
 	v.SetDefault("admin.name", "Admin")
+	v.SetDefault("clerk.jwks_url", "https://clerk.example.com/.well-known/jwks.json")
 
 	v.SetDefault("providers.webhook.timeout_seconds", 30)
 	v.SetDefault("providers.webhook.max_retries", 5)
 	v.SetDefault("providers.slack.timeout_seconds", 30)
 
 	v.SetDefault("providers.email_routing.mode", "backup")
+	v.SetDefault("providers.email.default_from", "no-reply@example.com")
 	v.SetDefault("providers.sms_routing.mode", "backup")
 	v.SetDefault("providers.push_routing.mode", "backup")
 	v.SetDefault("providers.webhook_routing.mode", "backup")
@@ -429,21 +495,81 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.headers.enable_secure_headers", true)
 	v.SetDefault("security.headers.allowed_origins", []string{"*"})
 	v.SetDefault("security.request.max_body_size_mb", 2)
+
+	v.SetDefault("security.spam_assassin.enabled", true)
+	v.SetDefault("security.spam_assassin.host", "localhost")
+	v.SetDefault("security.spam_assassin.port", 783)
+
+	v.SetDefault("security.content_security.enabled", false)
+	v.SetDefault("security.content_security.sussy_words", []string{"crypto", "casino", "free money", "winner", "urgent"})
+	v.SetDefault("security.content_security.blocked_links", []string{"bit.ly", "tinyurl.com", "malicious-site.com"})
+
+	// Autoscaler defaults
+	v.SetDefault("autoscaler.enabled", false)
+	v.SetDefault("autoscaler.evaluation_interval", "15s")
+	v.SetDefault("autoscaler.high_mttd_threshold", "5s")
+	v.SetDefault("autoscaler.medium_mttd_threshold", "10s")
+	v.SetDefault("autoscaler.low_mttd_threshold", "15s")
+	v.SetDefault("autoscaler.max_lag_per_worker", 50)
+	v.SetDefault("autoscaler.cooldown_period", "60s")
+	v.SetDefault("autoscaler.scale_down_factor", 0.5)
+	v.SetDefault("autoscaler.idle_threshold", "5m")
+	v.SetDefault("autoscaler.unhealthy_threshold", 6)
+	v.SetDefault("autoscaler.global_max_workers", 20)
+	v.SetDefault("autoscaler.global_min_workers", 1)
+	v.SetDefault("autoscaler.mttd_lookback", "3m")
 }
 
 func validate(cfg *Config) error {
 	if cfg.Database.DSN == "" {
 		return fmt.Errorf("database.dsn is required")
 	}
-	if cfg.JWT.Secret == "" && cfg.Server.Mode == "release" {
-		return fmt.Errorf("jwt.secret is required in release mode")
+
+	if cfg.Server.Mode == "release" {
+		if isDisallowedSecretValue(cfg.JWT.Secret) {
+			return fmt.Errorf("jwt.secret is missing or placeholder in release mode; set NS_JWT_SECRET to a strong secret")
+		}
+		if len(strings.TrimSpace(cfg.JWT.Secret)) < 32 {
+			return fmt.Errorf("jwt.secret must be at least 32 characters in release mode")
+		}
+
+		if isDisallowedSecretValue(cfg.Security.VendorConfigEncryptionKey) {
+			return fmt.Errorf("security.vendor_config_encryption_key is missing or placeholder in release mode; set NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY")
+		}
 	}
-	if strings.TrimSpace(cfg.Security.VendorConfigEncryptionKey) == "" && cfg.Server.Mode == "release" {
-		return fmt.Errorf("security.vendor_config_encryption_key is required in release mode")
-	}
+
 	// If admin bootstrap is configured, require both email + password.
 	if (cfg.Admin.Email != "" || cfg.Admin.Password != "") && (cfg.Admin.Email == "" || cfg.Admin.Password == "") {
 		return fmt.Errorf("admin.email and admin.password must both be set")
 	}
 	return nil
+}
+
+// isDisallowedSecretValue returns true for empty/placeholder values that must
+// never be accepted in release mode.
+func isDisallowedSecretValue(s string) bool {
+	v := strings.TrimSpace(strings.ToLower(s))
+	if v == "" {
+		return true
+	}
+
+	switch v {
+	case "<set_in_env>", "change-me-in-production", "changeme", "set_in_env", "set-in-env", "secret", "password":
+		return true
+	}
+
+	if strings.Contains(v, "encryption_key_here") {
+		return true
+	}
+	if strings.Contains(v, "placeholder") {
+		return true
+	}
+	return false
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

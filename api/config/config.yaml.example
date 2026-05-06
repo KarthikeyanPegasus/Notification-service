@@ -1,0 +1,142 @@
+# ── NotifyHub Configuration ─────────────────────────────────────────────────
+# Copy this file to config.yaml and fill in secrets.
+#
+# Two workflow modes:
+#   standalone — workers use in-process goroutines (no Temporal needed)
+#   temporal   — requires a running Temporal Server at host_port
+#
+# Most values shown here are defaults. The real config.yaml is gitignored
+# so secrets never end up in version control. Override any value via
+# the NS_ environment variable (e.g. NS_DATABASE_DSN, NS_JWT_SECRET).
+
+server:
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+  shutdown_timeout: 30s
+  mode: debug                   # switch to "release" in production
+
+database:
+  dsn: "<SET_IN_ENV>"           # set via NS_DATABASE_DSN
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 5m
+  migration_dir: "migrations"
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+pubsub:
+  mode: mock                    # mock | kafka | redis | gcp
+  project_id: local-project
+
+# ── Workflow engine ──────────────────────────────────────────────────────────
+# standalone = in-process goroutines (default, no Temporal required)
+# temporal   = connect to Temporal Server for durable orchestration
+# cadence    = connect to Uber Cadence
+cadence:
+  mode: standalone
+  host_port: ""
+  domain: ""
+
+# ── Authentication ───────────────────────────────────────────────────────────
+jwt:
+  secret: "<SET_IN_ENV>"        # set via NS_JWT_SECRET (32+ chars in prod)
+  expiry: 24h
+  service_secret: "<SET_IN_ENV>" # set via NS_JWT_SERVICE_SECRET
+
+clerk:
+  secret_key: "<SET_IN_ENV>"    # set via NS_CLERK_SECRET_KEY
+  webhook_secret: "<SET_IN_ENV>" # set via NS_CLERK_WEBHOOK_SECRET
+  jwks_url: "https://clerk.example.com/.well-known/jwks.json"
+
+# ── Admin bootstrap ─────────────────────────────────────────────────────────
+# If email + password are set, an admin user is created on first startup.
+# Set via NS_ADMIN_EMAIL and NS_ADMIN_PASSWORD.
+admin:
+  email: ""
+  name: ""
+  password: ""
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+log:
+  level: debug
+  format: console
+
+# ── Providers ────────────────────────────────────────────────────────────────
+# Configured dynamically per API key via the DB vendor_configs table.
+# Static defaults below are only used if no dynamic config exists.
+providers:
+  email:
+    primary: ""
+    ses:
+      region: us-east-1
+      access_key_id: ""
+      secret_access_key: ""
+      from_address: ""
+      from_name: ""
+    mailgun:
+      domain: ""
+      api_key: ""
+      from: ""
+    smtp:
+      host: "localhost"
+      port: 1025
+      username: ""
+      password: ""
+      from: ""
+
+  sms:
+    primary: ""
+    twilio:
+      account_sid: ""
+      auth_token: ""
+      from_number: ""
+    plivo:
+      auth_id: ""
+      auth_token: ""
+      from_number: ""
+    vonage:
+      api_key: ""
+      api_secret: ""
+      from: "NotifSvc"
+
+  push:
+    fcm:
+      service_account_json: ""
+    apns:
+      key_file: ""
+      key_id: ""
+      team_id: ""
+      bundle_id: ""
+      sandbox: true
+    pushwoosh:
+      application_code: ""
+      api_access_token: ""
+
+  webhook:
+    signing_secret: ""
+    timeout_seconds: 30
+    max_retries: 5
+
+# ── Security ─────────────────────────────────────────────────────────────────
+security:
+  # base64-encoded 32 bytes — set via NS_SECURITY_VENDOR_CONFIG_ENCRYPTION_KEY
+  # In non-release mode, an ephemeral key is auto-generated if this is empty.
+  vendor_config_encryption_key: "<SET_IN_ENV>"
+  rate_limit:
+    enabled: true
+    rps: 100
+    burst: 100
+  ddos:
+    block_threshold: 500
+    block_duration: 5m
+  headers:
+    enable_secure_headers: true
+    allowed_origins:
+      - "http://localhost:3000"
+      - "http://localhost:8080"
+  request:
+    max_body_size_mb: 2

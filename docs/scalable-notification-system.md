@@ -2001,19 +2001,6 @@ Cadence Metrics:
   cadence.task_queue.backlog      [task_list]
 ```
 
-### 18.2 Dashboards (Grafana)
-
-```
-1. Notification Overview:   Total sent, failure rate, DLQ depth
-2. Channel Health:          Per-channel success/failure timeseries
-3. OTP Dashboard:           Generation rate, verify success rate, fraud attempts
-4. Provider Status:         Latency heatmaps per vendor, error rates per vendor
-5. Circuit Breaker Status:  Per-vendor CB state (CLOSED/OPEN/HALF_OPEN) + failure %
-                             + fallback trigger rate per channel
-6. Pub/Sub Health:          Undelivered message count + oldest unacked age per subscription
-7. Cadence Health:          Workflow completion rate, failed workflows, task queue backlog
-```
-
 ### 18.3 Alerts
 
 | Alert | Threshold | Severity |
@@ -2080,7 +2067,7 @@ Cadence Metrics:
 | Webhook Notifications   | Outbound Webhook Dispatcher                  | Server-to-server event callbacks                                                |
 | Circuit Breaker         | Resilience4j                                 | Per-provider fault isolation                                                    |
 | Secret Management       | GCP Secret Manager                           | Rotate provider credentials                                                     |
-| Observability           | Prometheus + Grafana                         | Metrics dashboards                                                              |
+| Prometheus Metrics      | prometheus/client_golang                     | `/metrics` endpoints on API and Worker services                                 |
 | Distributed Tracing     | Google Cloud Trace / Jaeger                  | End-to-end request tracing                                                      |
 | Log Aggregation         | Google Cloud Logging / ELK                   | Centralized structured logs                                                     |
 | Container Orchestration | Kubernetes (GKE)                             | Auto-scaling, rolling deploys                                                   |
