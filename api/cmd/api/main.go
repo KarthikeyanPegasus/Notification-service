@@ -171,6 +171,9 @@ func main() {
 	prefsSvc := service.NewPreferencesService(prefsRepo, redisClient, log)
 	otpSvc := service.NewOTPService(redisClient)
 	wfClients := service.NewWorkflowClientProvider(engine, vendorConfigRepo, cfg, log)
+
+	// ── Retry Config Repository ────────────────────────────────────────────────
+	retryConfigRepo := repository.NewVendorRetryConfigRepository(db)
 	notifSvc := service.NewNotificationService(
 		notifRepo, schedRepo, eventRepo, attemptRepo,
 		templateSvc, prefsSvc, wfClients, publisher, cfg, vendorConfigRepo, log,
@@ -225,7 +228,7 @@ func main() {
 		cfg.PubSub.Mode,
 		cfg.PubSub.Kafka.Brokers,
 		log,
-	).WithMigrationManager(migrationMgr).WithVendorMigrationService(vendorMigrationSvc).WithDLQRepository(dlqRepo)
+	).WithMigrationManager(migrationMgr).WithRetryConfigRepository(retryConfigRepo).WithVendorMigrationService(vendorMigrationSvc).WithDLQRepository(dlqRepo)
 	testDeliveryHandler := handler.NewTestDeliveryHandler(vendorConfigRepo, notifSvc, log)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeySvc, log)
 	userAdminHandler := handler.NewUserAdminHandler(userRepo, apiKeyRepo)

@@ -47,68 +47,32 @@ import {
 const STORAGE_KEY = 'notifyhub-sidebar-collapsed'
 
 type NavItem = { href: string; label: string; icon: React.ElementType; roles: Role[]; children?: NavItem[]; exact?: boolean }
-type NavSection = { id: string; label: string; icon: React.ElementType; items: NavItem[] }
 
-const navSections: NavSection[] = [
+const navItems: NavItem[] = [
+  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'manager', 'dev', 'support'] },
+  { href: '/notifications', label: 'Notifications', icon: Bell, roles: ['admin', 'manager', 'dev', 'support'] },
+  { href: '/templates', label: 'Templates', icon: Bell, roles: ['admin', 'manager', 'dev'] },
+  { href: '/scheduled', label: 'Scheduled', icon: Clock, roles: ['admin', 'manager', 'dev', 'support'] },
+  { href: '/reports', label: 'Reports', icon: BarChart3, roles: ['admin', 'manager', 'dev'] },
+  { href: '/app-store', label: 'App Store', icon: ShoppingBag, roles: ['admin', 'manager', 'dev'] },
+  { href: '/governance/suppressions', label: 'Suppressions', icon: ShieldAlert, roles: ['admin', 'manager', 'dev', 'support'] },
+  { href: '/governance/opt-outs', label: 'Opt-outs', icon: ShieldAlert, roles: ['admin', 'manager', 'dev', 'support'] },
+  { href: '/admin/dlq', label: 'Dead-Letter Queue', icon: ShieldAlert, roles: ['admin', 'manager', 'dev', 'support'] },
+  { href: '/settings', label: 'Settings', icon: Settings, roles: ['admin', 'manager', 'dev'] },
+  { href: '/clients', label: 'Client management', icon: KeyRound, roles: ['admin', 'manager', 'dev'] },
+  { href: '/people', label: 'People', icon: Users, roles: ['admin', 'dev'] },
+  { href: '/admin', label: 'Admin Dashboard', icon: ShieldAlert, roles: ['admin'], exact: true },
+  { href: '/admin/api-settings', label: 'API Settings', icon: KeyRound, roles: ['admin'] },
   {
-    id: 'monitoring',
-    label: 'Monitor & analyze',
-    icon: LayoutDashboard,
-    items: [
-      { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'manager', 'dev', 'support'] },
-      { href: '/notifications', label: 'Notifications', icon: Bell, roles: ['admin', 'manager', 'dev', 'support'] },
-      { href: '/reports', label: 'Reports', icon: BarChart3, roles: ['admin', 'manager', 'dev'] },
-    ],
-  },
-  {
-    id: 'delivery',
-    label: 'Create & deliver',
-    icon: Bell,
-    items: [
-      { href: '/templates', label: 'Templates', icon: Bell, roles: ['admin', 'manager', 'dev'] },
-      { href: '/scheduled', label: 'Scheduled', icon: Clock, roles: ['admin', 'manager', 'dev', 'support'] },
-      { href: '/app-store', label: 'App Store', icon: ShoppingBag, roles: ['admin', 'manager', 'dev'] },
-    ],
-  },
-  {
-    id: 'governance',
-    label: 'Governance & ops',
-    icon: ShieldAlert,
-    items: [
-      { href: '/governance/suppressions', label: 'Suppressions', icon: ShieldAlert, roles: ['admin', 'manager', 'dev', 'support'] },
-      { href: '/governance/opt-outs', label: 'Opt-outs', icon: ShieldAlert, roles: ['admin', 'manager', 'dev', 'support'] },
-      { href: '/admin/dlq', label: 'Dead-Letter Queue', icon: ShieldAlert, roles: ['admin', 'manager', 'dev', 'support'] },
-    ],
-  },
-  {
-    id: 'configuration',
-    label: 'Configure workspace',
-    icon: Settings,
-    items: [
-      { href: '/settings', label: 'Settings', icon: Settings, roles: ['admin', 'manager', 'dev'] },
-      { href: '/clients', label: 'Client management', icon: KeyRound, roles: ['admin', 'manager', 'dev'] },
-      { href: '/people', label: 'People', icon: Users, roles: ['admin', 'dev'] },
-      { href: '/admin', label: 'Admin Dashboard', icon: ShieldAlert, roles: ['admin'], exact: true },
-      { href: '/admin/api-settings', label: 'API Settings', icon: KeyRound, roles: ['admin'] },
-    ],
-  },
-  {
-    id: 'developer',
-    label: 'Developer resources',
+    href: '/docs',
+    label: 'Docs',
     icon: Book,
-    items: [
-      {
-        href: '/docs',
-        label: 'Docs',
-        icon: Book,
-        roles: ['admin', 'dev'],
-        children: [
-          { href: '/docs', label: 'Overview', icon: Book, roles: ['admin', 'dev'], exact: true },
-          { href: '/docs/api', label: 'API Reference', icon: Book, roles: ['admin', 'dev'] },
-          { href: '/docs/sdk/go', label: 'SDK — Go', icon: Book, roles: ['admin', 'dev'] },
-          { href: '/docs/sdk/dotnet', label: 'SDK — .NET', icon: Book, roles: ['admin', 'dev'] },
-        ],
-      },
+    roles: ['admin', 'dev'],
+    children: [
+      { href: '/docs', label: 'Overview', icon: Book, roles: ['admin', 'dev'], exact: true },
+      { href: '/docs/api', label: 'API Reference', icon: Book, roles: ['admin', 'dev'] },
+      { href: '/docs/sdk/go', label: 'SDK — Go', icon: Book, roles: ['admin', 'dev'] },
+      { href: '/docs/sdk/dotnet', label: 'SDK — .NET', icon: Book, roles: ['admin', 'dev'] },
     ],
   },
 ]
@@ -241,6 +205,35 @@ function NavGroup({
 
   const Icon = item.icon
 
+  if (compact) {
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            title={item.label}
+            className={cn(
+              'flex w-full items-center justify-center rounded-md px-2 py-2 text-sm font-medium transition-colors outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring',
+              isParentActive
+                ? 'bg-primary text-primary-foreground'
+                : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+            )}
+            aria-label={item.label}
+          >
+            <Icon className="h-4 w-4 shrink-0" aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="right" align="start" className="w-56">
+          <DropdownMenuLabel>{item.label}</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {item.children.map((child) => (
+            <CompactNavMenuItem key={child.href} item={child} pathname={pathname} onClick={onClick} />
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    )
+  }
+
   return (
     <div>
       <button
@@ -248,8 +241,7 @@ function NavGroup({
         title={item.label}
         onClick={() => setOpen((value) => !value)}
         className={cn(
-          'flex w-full items-center gap-3 rounded-md py-2 text-sm font-medium transition-colors',
-          compact ? 'justify-center px-2' : 'px-3',
+          'flex w-full items-center gap-3 rounded-md py-2 text-sm font-medium transition-colors px-3',
           isParentActive
             ? 'bg-accent text-accent-foreground'
             : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
@@ -257,15 +249,13 @@ function NavGroup({
         aria-expanded={open}
       >
         <Icon className="h-4 w-4 shrink-0" aria-hidden />
-        <span className={cn('flex-1 text-left', compact && 'sr-only')}>{item.label}</span>
-        {!compact && (
-          <ChevronDown
-            className={cn('h-4 w-4 shrink-0 transition-transform', open && 'rotate-180')}
-            aria-hidden
-          />
-        )}
+        <span className="flex-1 text-left">{item.label}</span>
+        <ChevronDown
+          className={cn('h-4 w-4 shrink-0 transition-transform', open && 'rotate-180')}
+          aria-hidden
+        />
       </button>
-      {open && !compact && (
+      {open && (
         <div className="mt-0.5 space-y-0.5">
           {item.children.map((child) => (
             <NavLink
@@ -285,95 +275,6 @@ function NavGroup({
   )
 }
 
-function NavSectionGroup({
-  section,
-  pathname,
-  compact,
-  onClick,
-}: {
-  section: NavSection
-  pathname: string
-  compact: boolean
-  onClick?: () => void
-}) {
-  const isSectionActive = section.items.some((item) => isItemActive(item, pathname))
-  const [open, setOpen] = useState(isSectionActive)
-  const Icon = section.icon
-
-  useEffect(() => {
-    if (isSectionActive) setOpen(true)
-  }, [isSectionActive])
-
-  if (compact) {
-    return (
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            title={section.label}
-            className={cn(
-              'flex w-full items-center justify-center rounded-md px-2 py-2 text-sm font-medium transition-colors outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring',
-              isSectionActive
-                ? 'bg-primary text-primary-foreground'
-                : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
-            )}
-            aria-label={section.label}
-          >
-            <Icon className="h-4 w-4 shrink-0" aria-hidden />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent side="right" align="start" className="w-56">
-          <DropdownMenuLabel>{section.label}</DropdownMenuLabel>
-          <DropdownMenuSeparator />
-          {section.items.map((item) => (
-            <CompactNavMenuItem
-              key={item.href}
-              item={item}
-              pathname={pathname}
-              onClick={onClick}
-            />
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    )
-  }
-
-  return (
-    <div className="space-y-1">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className={cn(
-          'flex w-full items-center gap-2 rounded-md px-3 py-2 text-xs font-semibold uppercase tracking-wide transition-colors',
-          isSectionActive
-            ? 'text-foreground hover:bg-accent'
-            : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
-        )}
-        aria-expanded={open}
-      >
-        <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
-        <span className="flex-1 text-left">{section.label}</span>
-        <ChevronDown
-          className={cn('h-4 w-4 shrink-0 transition-transform', open && 'rotate-180')}
-          aria-hidden
-        />
-      </button>
-      {open && (
-        <div className="space-y-1">
-          {section.items.map((item) => (
-            <NavGroup
-              key={item.href}
-              item={item}
-              pathname={pathname}
-              compact={compact}
-              onClick={onClick}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
 
 export function Sidebar() {
   const pathname = usePathname() ?? ''
@@ -449,14 +350,7 @@ export function Sidebar() {
     }
   }
 
-  const visibleNavSections = useMemo(() => {
-    return navSections
-      .map((section) => ({
-        ...section,
-        items: filterNavItemsByRole(section.items, role),
-      }))
-      .filter((section) => section.items.length > 0)
-  }, [role])
+  const visibleNavItems = useMemo(() => filterNavItemsByRole(navItems, role), [role])
 
   // Never return early before hooks run; keep this after hooks to avoid hook-order issues.
   if (pathname === '/login') return null
@@ -490,7 +384,7 @@ export function Sidebar() {
               />
             </span>
           ) : (
-            <span className="relative w-full h-10">
+            <span className="relative w-full h-10 px-4">
               <Image
                 src="/assets/logo_large.png"
                 alt="NotifyHub"
@@ -503,11 +397,11 @@ export function Sidebar() {
         </button>
       </div>
 
-      <nav className="flex-1 space-y-4 overflow-y-auto overflow-x-hidden p-3">
-        {visibleNavSections.map((section) => (
-          <NavSectionGroup
-            key={section.id}
-            section={section}
+      <nav className="flex-1 space-y-1 overflow-y-auto overflow-x-hidden p-3">
+        {visibleNavItems.map((item) => (
+          <NavGroup
+            key={item.href}
+            item={item}
             pathname={pathname}
             compact={opts.compact}
             onClick={() => setMobileOpen(false)}

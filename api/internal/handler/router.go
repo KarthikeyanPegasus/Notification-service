@@ -179,6 +179,11 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		admin.PUT("/config/rate-limits/:vendor_name", RequireRole("admin", "manager", "dev"), RequireClientScope(deps.UserRepo), deps.AdminHandler.UpsertVendorRateLimit)
 		admin.DELETE("/config/rate-limits/:vendor_name", RequireRole("admin", "dev"), RequireClientScope(deps.UserRepo), deps.AdminHandler.DeleteVendorRateLimit)
 
+		// Vendor retry configs: retry_initial_interval_ms, retry_max_interval_ms, retry_max_attempts, retry_backoff_coefficient, sla_seconds
+		admin.GET("/config/retry-configs", RequireRole("admin", "manager", "dev"), RequireClientScope(deps.UserRepo), deps.AdminHandler.GetVendorRetryConfigs)
+		admin.PUT("/config/retry-configs/:vendor_name", RequireRole("admin", "manager", "dev"), RequireClientScope(deps.UserRepo), deps.AdminHandler.UpsertVendorRetryConfig)
+		admin.DELETE("/config/retry-configs/:vendor_name", RequireRole("admin", "dev"), RequireClientScope(deps.UserRepo), deps.AdminHandler.DeleteVendorRetryConfig)
+
 		// AutoScaler config — runtime autoscaler settings.
 		admin.GET("/config/autoscaler", RequireRole("admin"), deps.AdminHandler.GetAutoScalerConfig)
 		admin.PUT("/config/autoscaler", RequireRole("admin"), deps.AdminHandler.UpdateAutoScalerConfig)

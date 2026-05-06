@@ -19,14 +19,15 @@ import (
 	"github.com/spidey/notification-service/internal/repository"
 	"github.com/spidey/notification-service/internal/service"
 	"go.uber.org/zap"
-)
+) 
 
 type AdminHandler struct {
 	configSvc          service.ConfigService
 	rateLimitRepo      repository.VendorRateLimitRepository
+	retryConfigRepo    repository.VendorRetryConfigRepository
 	notifRepo          *repository.NotificationRepository
 	dlqRepo            *repository.DLQRepository
-	engineName         string // temporal | cadence | standalone
+	engineName         string // temporal | cadence | standalone | go_routines
 	pubsubMode         string // kafka | redis | mock | gcp
 	kafkaBrokers       []string
 	log                *zap.Logger
@@ -62,6 +63,12 @@ func NewAdminHandler(
 		kafkaBrokers:  kafkaBrokers,
 		log:           log,
 	}
+}
+
+// WithRetryConfigRepository wires the retry config repository for retry config endpoints.
+func (h *AdminHandler) WithRetryConfigRepository(retryRepo repository.VendorRetryConfigRepository) *AdminHandler {
+	h.retryConfigRepo = retryRepo
+	return h
 }
 
 // WithMigrationManager wires the MigrationManager for migration status reporting and control.
@@ -1001,6 +1008,109 @@ func (h *AdminHandler) UpdateAutoScalerConfig(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "autoscaler config updated", "config": toConfigResponse(current)})
+}
+
+// ── Vendor Retry Config Endpoints ──────────────────────────────────────────
+
+// GetVendorRetryConfigs returns all active vendor retry/backoff configurations.
+func (h *AdminHandler) GetVendorRetryConfigs(c *gin.Context) {
+	var apiKeyID *string
+	if v := c.GetString("scoped_api_key_id"); v != "" {
+		apiKeyID = &v
+	} else if v := c.Query("api_key_id"); v != "" {
+		apiKeyID = &v
+	}
+
+	configs, err := h.retryConfigRepo.ListActive(c.Request.Context(), apiKeyID)
+	if err != nil {
+		h.log.Error("failed to list vendor retry configs", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve retry configurations"})
+		return
+	}
+	if configs == nil {
+		configs = []*domain.VendorRetryConfig{}
+	}
+	c.JSON(http.StatusOK, configs)
+}
+
+// UpsertVendorRetryConfig creates or updates the retry config for a specific vendor.
+func (h *AdminHandler) UpsertVendorRetryConfig(c *gin.Context) {
+	vendorName := c.Param("vendor_name")
+	if vendorName == "" {
+		respondError(c, http.StatusBadRequest, "BAD_REQUEST", "vendor_name path param required")
+		return
+	}
+
+	var req domain.UpsertVendorRetryConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var apiKeyID *string
+	if v := c.GetString("scoped_api_key_id"); v != "" {
+		apiKeyID = &v
+	} else if v := c.Query("api_key_id"); v != "" {
+		apiKeyID = &v
+	}
+
+	// Load existing config to merge, or start with defaults
+	var cfg *domain.VendorRetryConfig
+	existing, _ := h.retryConfigRepo.Get(c.Request.Context(), vendorName, apiKeyID)
+	if existing != nil {
+		cfg = existing
+	} else {
+		cfg = domain.DefaultRetryConfig(vendorName)
+	}
+
+	if req.RetryInitialIntervalMs != nil {
+		cfg.RetryInitialIntervalMs = *req.RetryInitialIntervalMs
+	}
+	if req.RetryMaxIntervalMs != nil {
+		cfg.RetryMaxIntervalMs = *req.RetryMaxIntervalMs
+	}
+	if req.RetryMaxAttempts != nil {
+		cfg.RetryMaxAttempts = *req.RetryMaxAttempts
+	}
+	if req.RetryBackoffCoefficient != nil {
+		cfg.RetryBackoffCoefficient = *req.RetryBackoffCoefficient
+	}
+	if req.SLA != nil {
+		cfg.SLA = *req.SLA
+	}
+	cfg.IsActive = true
+
+	if err := h.retryConfigRepo.Upsert(c.Request.Context(), cfg, apiKeyID); err != nil {
+		h.log.Error("failed to upsert vendor retry config", zap.String("vendor", vendorName), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save retry configuration"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "retry configuration updated", "vendor": vendorName, "config": cfg})
+}
+
+// DeleteVendorRetryConfig removes the retry config for a specific vendor.
+func (h *AdminHandler) DeleteVendorRetryConfig(c *gin.Context) {
+	vendorName := c.Param("vendor_name")
+	if vendorName == "" {
+		respondError(c, http.StatusBadRequest, "BAD_REQUEST", "vendor_name path param required")
+		return
+	}
+
+	var apiKeyID *string
+	if v := c.GetString("scoped_api_key_id"); v != "" {
+		apiKeyID = &v
+	} else if v := c.Query("api_key_id"); v != "" {
+		apiKeyID = &v
+	}
+
+	if err := h.retryConfigRepo.Delete(c.Request.Context(), vendorName, apiKeyID); err != nil {
+		h.log.Error("failed to delete vendor retry config", zap.String("vendor", vendorName), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete retry configuration"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "retry configuration removed", "vendor": vendorName})
 }
 
 func mustParseDuration(s string) time.Duration {

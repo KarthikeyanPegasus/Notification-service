@@ -122,7 +122,10 @@ func main() {
 
 	// Workflow client provider: chooses temporal vs cadence per API key scope
 	// based on DB vendor config `workflow_orchestration`.
-	wfClients := service.NewWorkflowClientProvider(engine, vendorConfigRepo, cfg, log)
+	// ── Retry Config Repository ────────────────────────────────────────────────
+	retryConfigRepo := repository.NewVendorRetryConfigRepository(db)
+
+	wfClients := service.NewWorkflowClientProvider(engine, vendorConfigRepo, cfg, log).WithRetryConfigRepo(retryConfigRepo)
 
 	// ── Publisher (for PublishToPubSubActivity, config reload signals) ────────
 	var publisher pubsub.Publisher
@@ -160,6 +163,9 @@ func main() {
 		contentFilter,
 		log,
 	)
+
+	// Attach activities to wfClients to enable Go Routines mode in Worker process
+	wfClients.WithActivities(acts)
 
 	// ── Migration Manager ─────────────────────────────────────────────────────
 	migrationRepo := repository.NewMigrationRepository(db)

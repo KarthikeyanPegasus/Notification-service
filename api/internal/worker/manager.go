@@ -537,6 +537,9 @@ func (m *WorkerManager) desiredWorkers(ctx context.Context, keys []*domain.APIKe
 					set[wf.TaskQueueFor(ch, p, "")] = &desiredWorker{engine: globalEngine, providerName: globalEngine.ProviderName()}
 				}
 			}
+		} else if m.engineProvider != nil {
+			// Even without a global engine, still register desired workers
+			// for any per-client go_routines engines.
 		}
 	}
 
@@ -549,8 +552,20 @@ func (m *WorkerManager) desiredWorkers(ctx context.Context, keys []*domain.APIKe
 			continue
 		}
 		id := k.ID
-		engine, _ := m.engineProvider.ClientForScope(ctx, &id)
+		engine, err := m.engineProvider.ClientForScope(ctx, &id)
+		if err != nil {
+			m.log.Warn("failed to get workflow engine for client; skipping worker creation",
+				zap.String("client_id", id),
+				zap.String("client_name", k.Name),
+				zap.Error(err),
+			)
+			continue
+		}
 		if engine == nil {
+			m.log.Debug("no workflow engine configured for client; skipping worker creation",
+				zap.String("client_id", id),
+				zap.String("client_name", k.Name),
+			)
 			continue
 		}
 

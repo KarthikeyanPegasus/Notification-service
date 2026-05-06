@@ -187,6 +187,16 @@ export default function NotificationDetailPage({ params }: Props) {
             </pre>
           } />
           {notification.provider && <DetailRow label="Provider" value={notification.provider} />}
+          {notification.orchestration && (
+            <DetailRow
+              label="Orchestration"
+              value={
+                <Badge variant="outline" className="capitalize font-mono">
+                  {notification.orchestration === 'go_routines' ? 'Go Routines' : notification.orchestration}
+                </Badge>
+              }
+            />
+          )}
           {notification.idempotency_key && (
             <DetailRow label="Idempotency Key" value={
               <code className="text-xs">{notification.idempotency_key}</code>

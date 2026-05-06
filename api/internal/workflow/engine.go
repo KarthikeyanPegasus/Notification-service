@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/spidey/notification-service/internal/config"
+	"github.com/spidey/notification-service/internal/repository"
 	"go.uber.org/zap"
 )
 
@@ -58,7 +59,21 @@ func NewEngine(cfg *config.Config, log *zap.Logger) (WorkflowEngine, error) {
 		return NewCadenceEngine(cfg, log)
 	}
 
+	if mode == "go_routines" {
+		return NewGoRoutinesEngine(log, nil), nil
+	}
+
 	return NewTemporalEngine(cfg, log)
+}
+
+// NewGoRoutinesEngineWith creates a GoRoutinesEngine with a retry config repo and activities.
+// This is used by the WorkflowClientProvider for per-client scoped engines.
+func NewGoRoutinesEngineWith(log *zap.Logger, retryConfigRepo repository.VendorRetryConfigRepository, activities *Activities) *GoRoutinesEngine {
+	engine := NewGoRoutinesEngine(log, retryConfigRepo)
+	if activities != nil {
+		engine.workflowHandler = NewGoRoutinesWorkflowHandler(activities, retryConfigRepo, log)
+	}
+	return engine
 }
 
 func normalizeMode(raw string) string {

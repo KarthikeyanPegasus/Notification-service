@@ -269,9 +269,11 @@ export default function DashboardPage() {
           {vendorQuery.isLoading ? (
             Array.from({ length: 4 }).map((_, i) => <CardSkeleton key={i} />)
           ) : vendorQuery.data && vendorQuery.data.length > 0 ? (
-            vendorQuery.data.map((v) => (
-              <VendorStatusCard key={v.provider} metric={v} />
-            ))
+            vendorQuery.data
+              .filter((v) => v.provider !== 'api_docs_visibility' && v.provider !== 'ses')
+              .map((v) => (
+                <VendorStatusCard key={v.provider} metric={v} />
+              ))
           ) : (
             <div className="col-span-full p-8 text-center border border-dashed rounded-xl bg-muted/10 text-muted-foreground italic text-sm">
               No active vendor telemetry detected in the current window.
@@ -290,9 +292,11 @@ export default function DashboardPage() {
           {billingQuery.isLoading ? (
             Array.from({ length: 4 }).map((_, i) => <CardSkeleton key={i} />)
           ) : billingQuery.data && billingQuery.data.length > 0 ? (
-            billingQuery.data.map((b) => (
-              <VendorBillingCard key={b.provider} billing={b} />
-            ))
+            billingQuery.data
+              .filter((b) => b.provider !== 'api_docs_visibility' && b.provider !== 'ses')
+              .map((b) => (
+                <VendorBillingCard key={b.provider} billing={b} />
+              ))
           ) : (
             <div className="col-span-full p-8 text-center border border-dashed rounded-xl bg-muted/10 text-muted-foreground italic text-sm">
               No vendor billing data available for the current scope.

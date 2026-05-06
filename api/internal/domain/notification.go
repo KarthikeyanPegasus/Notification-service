@@ -135,6 +135,7 @@ type Notification struct {
 	Source          string             `json:"source" db:"source"`
 	Provider        string             `json:"provider"`
 	ForcedVendor    string             `json:"forced_vendor,omitempty" db:"forced_vendor"`
+	Orchestration   string             `json:"orchestration" db:"orchestration"`
 	ClientName      string             `json:"client_name"`
 	CreatedAt       time.Time          `json:"created_at" db:"created_at"`
 	UpdatedAt       time.Time          `json:"updated_at" db:"updated_at"`

@@ -127,7 +127,14 @@ export function NotificationsTable({
         cell: ({ row }) => (
           <div className="min-w-0">
             <div className="text-sm text-muted-foreground truncate">{row.original.provider ?? '—'}</div>
-            <div className="text-xs text-muted-foreground truncate">{(row.original as any).source ?? ''}</div>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className="text-xs text-muted-foreground">{(row.original as any).source ?? ''}</span>
+              {row.original.orchestration && (
+                <Badge variant="outline" className="text-[10px] px-1 py-0 font-mono h-4 leading-none">
+                  {row.original.orchestration === 'go_routines' ? 'Go' : row.original.orchestration === 'temporal' ? 'T' : row.original.orchestration === 'cadence' ? 'C' : row.original.orchestration}
+                </Badge>
+              )}
+            </div>
           </div>
         ),
       },

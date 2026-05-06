@@ -242,6 +242,14 @@ func (s *NotificationService) publishImmediate(ctx context.Context, n *domain.No
 		s.log.Warn("workflow orchestration unavailable; falling back to direct delivery", zap.Error(err))
 		cli = nil
 	}
+
+	// Store the orchestration type on the notification for historical tracking
+	orchestration := ""
+	if cli != nil {
+		orchestration = cli.ProviderName()
+	}
+	_ = s.notifRepo.SetOrchestration(ctx, n.ID, orchestration)
+
 	// Execute Workflow if available
 	if cli != nil {
 		clientID := ""

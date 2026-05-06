@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Loader2, Save, Workflow } from 'lucide-react'
 import { getVendorConfigsScoped, updateVendorConfigScoped } from '@/lib/api'
 
-type Provider = 'temporal' | 'cadence'
+type Provider = 'temporal' | 'cadence' | 'go_routines'
 
 type WorkflowOrchestrationConfig = {
   provider?: Provider
@@ -115,7 +115,7 @@ export function WorkflowOrchestrationSettings({ apiKeyId }: { apiKeyId?: string 
             </div>
           ) : (
             <>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <Button
                   type="button"
                   variant={provider === 'temporal' ? 'default' : 'outline'}
@@ -129,6 +129,13 @@ export function WorkflowOrchestrationSettings({ apiKeyId }: { apiKeyId?: string 
                   onClick={() => setCfg((p) => ({ ...p, provider: 'cadence' }))}
                 >
                   Cadence
+                </Button>
+                <Button
+                  type="button"
+                  variant={provider === 'go_routines' ? 'default' : 'outline'}
+                  onClick={() => setCfg((p) => ({ ...p, provider: 'go_routines' }))}
+                >
+                  Go Routines
                 </Button>
               </div>
 
@@ -167,6 +174,15 @@ export function WorkflowOrchestrationSettings({ apiKeyId }: { apiKeyId?: string 
                       />
                     </div>
                   </div>
+                </div>
+              ) : provider === 'go_routines' ? (
+                <div className="space-y-4 rounded-lg border border-primary/20 bg-primary/5 p-4">
+                  <p className="text-sm font-medium text-primary">Go Routines (in-process workers)</p>
+                  <p className="text-sm text-muted-foreground">
+                    Uses in-process goroutines to deliver notifications directly without
+                    Temporal/Cadence. Workers auto-scale based on MTTD and Kafka lag metrics.
+                    Configure retry/backoff/SLA per vendor in the Settings &rarr; Vendor retry &amp; backoff section.
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-4 rounded-lg border p-4">

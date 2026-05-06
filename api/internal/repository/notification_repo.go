@@ -31,14 +31,15 @@ func (r *NotificationRepository) Create(ctx context.Context, n *domain.Notificat
 	const q = `
 		INSERT INTO notifications
 			(id, idempotency_key, user_id, channel, priority, type, template_id,
-			 rendered_content, recipient, status, scheduled_at, sent_at, delivered_at, api_key_id, source, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+			 rendered_content, recipient, status, scheduled_at, sent_at, delivered_at,
+			 api_key_id, source, orchestration, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		ON CONFLICT (idempotency_key) DO NOTHING`
 
 	tag, err := r.db.Pool.Exec(ctx, q,
 		n.ID, n.IdempotencyKey, n.UserID, n.Channel, n.Priority, n.Type,
 		n.TemplateID, content, n.Recipient, n.Status, n.ScheduledAt,
-		n.SentAt, n.DeliveredAt, n.APIKeyID, n.Source, n.CreatedAt, n.UpdatedAt,
+		n.SentAt, n.DeliveredAt, n.APIKeyID, n.Source, n.Orchestration, n.CreatedAt, n.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("inserting notification: %w", err)
@@ -53,7 +54,8 @@ func (r *NotificationRepository) Create(ctx context.Context, n *domain.Notificat
 func (r *NotificationRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Notification, error) {
 	const q = `
 		SELECT n.id, n.idempotency_key, n.user_id, n.channel, n.priority, n.type, n.template_id,
-		       n.rendered_content, n.recipient, n.status, n.scheduled_at, n.sent_at, n.delivered_at, n.api_key_id, n.source, n.created_at, n.updated_at,
+		       n.rendered_content, n.recipient, n.status, n.scheduled_at, n.sent_at, n.delivered_at,
+		       n.api_key_id, n.source, n.orchestration, n.created_at, n.updated_at,
 		       COALESCE(k.name, '') as client_name
 		FROM notifications n
 		LEFT JOIN api_keys k ON n.api_key_id = k.id
@@ -67,7 +69,8 @@ func (r *NotificationRepository) GetByID(ctx context.Context, id uuid.UUID) (*do
 func (r *NotificationRepository) GetByIdempotencyKey(ctx context.Context, key string) (*domain.Notification, error) {
 	const q = `
 		SELECT n.id, n.idempotency_key, n.user_id, n.channel, n.priority, n.type, n.template_id,
-		       n.rendered_content, n.recipient, n.status, n.scheduled_at, n.sent_at, n.delivered_at, n.api_key_id, n.source, n.created_at, n.updated_at,
+		       n.rendered_content, n.recipient, n.status, n.scheduled_at, n.sent_at, n.delivered_at,
+		       n.api_key_id, n.source, n.orchestration, n.created_at, n.updated_at,
 		       COALESCE(k.name, '') as client_name
 		FROM notifications n
 		LEFT JOIN api_keys k ON n.api_key_id = k.id
@@ -75,6 +78,13 @@ func (r *NotificationRepository) GetByIdempotencyKey(ctx context.Context, key st
 
 	row := r.db.Pool.QueryRow(ctx, q, key)
 	return scanNotification(row)
+}
+
+// SetOrchestration updates the orchestration provider on an existing notification.
+func (r *NotificationRepository) SetOrchestration(ctx context.Context, id uuid.UUID, orchestration string) error {
+	const q = `UPDATE notifications SET orchestration=$1, updated_at=NOW() WHERE id=$2`
+	_, err := r.db.Pool.Exec(ctx, q, orchestration, id)
+	return err
 }
 
 // UpdateStatus atomically updates notification status and updated_at.
@@ -185,7 +195,8 @@ func (r *NotificationRepository) List(ctx context.Context, f ListFilters) ([]*do
 	offset := (f.Page - 1) * f.PageSize
 	dataQ := fmt.Sprintf(`
 		SELECT n.id, n.idempotency_key, n.user_id, n.channel, n.priority, n.type, n.template_id,
-		       n.rendered_content, n.recipient, n.status, n.scheduled_at, n.sent_at, n.delivered_at, n.api_key_id, n.source, n.created_at, n.updated_at,
+		       n.rendered_content, n.recipient, n.status, n.scheduled_at, n.sent_at, n.delivered_at,
+		       n.api_key_id, n.source, n.orchestration, n.created_at, n.updated_at,
 		       COALESCE(k.name, '') as client_name,
 		       COALESCE(
 		           (SELECT provider FROM notification_attempts WHERE notification_id = n.id ORDER BY created_at DESC LIMIT 1),
@@ -223,7 +234,7 @@ func scanNotification(row pgx.Row) (*domain.Notification, error) {
 	err := row.Scan(
 		&n.ID, &n.IdempotencyKey, &n.UserID, &n.Channel, &n.Priority,
 		&n.Type, &n.TemplateID, &contentBytes, &n.Recipient, &n.Status,
-		&n.ScheduledAt, &n.SentAt, &n.DeliveredAt, &n.APIKeyID, &n.Source, &n.CreatedAt, &n.UpdatedAt,
+		&n.ScheduledAt, &n.SentAt, &n.DeliveredAt, &n.APIKeyID, &n.Source, &n.Orchestration, &n.CreatedAt, &n.UpdatedAt,
 		&n.ClientName,
 	)
 	if err != nil {
@@ -247,7 +258,7 @@ func scanNotificationRow(rows pgx.Rows) (*domain.Notification, error) {
 	err := rows.Scan(
 		&n.ID, &n.IdempotencyKey, &n.UserID, &n.Channel, &n.Priority,
 		&n.Type, &n.TemplateID, &contentBytes, &n.Recipient, &n.Status,
-		&n.ScheduledAt, &n.SentAt, &n.DeliveredAt, &n.APIKeyID, &n.Source, &n.CreatedAt, &n.UpdatedAt, &n.ClientName, &n.Provider,
+		&n.ScheduledAt, &n.SentAt, &n.DeliveredAt, &n.APIKeyID, &n.Source, &n.Orchestration, &n.CreatedAt, &n.UpdatedAt, &n.ClientName, &n.Provider,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scanning notification row: %w", err)
@@ -267,7 +278,7 @@ func (r *NotificationRepository) GetStuckNotifications(ctx context.Context, olde
 	const q = `
 		SELECT n.id, n.idempotency_key, n.user_id, n.channel, n.priority, n.type, n.template_id,
 		       n.rendered_content, n.recipient, n.status, n.scheduled_at, n.sent_at, n.delivered_at,
-		       n.api_key_id, n.source, n.created_at, n.updated_at,
+		       n.api_key_id, n.source, n.orchestration, n.created_at, n.updated_at,
 		       COALESCE(k.name, '') as client_name,
 		       COALESCE(
 		           (SELECT provider FROM notification_attempts WHERE notification_id = n.id ORDER BY created_at DESC LIMIT 1),

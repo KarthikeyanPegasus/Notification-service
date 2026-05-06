@@ -25,6 +25,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Mail, MessageSquare, Bell, Save, Loader2, ShieldCheck, AlertCircle, Activity, AlertTriangle, Database, Plus, Upload, FileJson, CheckCircle2, MessageCircle, X, Trash2, Eye, EyeOff, Send, Globe, Code } from 'lucide-react'
 import { TestDeliveryForm } from '@/components/settings/test-delivery-form'
 import { VendorRateLimits } from '@/components/settings/vendor-rate-limits'
+import { VendorRetryConfig } from '@/components/settings/vendor-retry-config'
 import { VendorMigrateDialog } from '@/components/settings/vendor-migrate-dialog'
 import { VendorMigrationStatus } from '@/components/settings/vendor-migration-status'
 import { cn } from '@/lib/utils'
@@ -1795,6 +1796,15 @@ export default function SettingsPage() {
 
               {canEditRateLimits && (
                 <VendorRateLimits
+                  apiKeyId={apiKeyId}
+                  vendorIds={configuredPushVendors}
+                  canEdit={canEditRateLimits}
+                  canDelete={canDeleteRateLimits}
+                />
+              )}
+
+              {canEditRateLimits && (
+                <VendorRetryConfig
                   apiKeyId={apiKeyId}
                   vendorIds={configuredPushVendors}
                   canEdit={canEditRateLimits}

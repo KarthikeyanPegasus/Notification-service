@@ -88,6 +88,8 @@ func (s *configService) UpdateVendorConfig(ctx context.Context, vendorType strin
 		case "cadence":
 			hostPort = normalizeHostPort(wfCfg.Cadence.HostPort)
 			namespace = wfCfg.Cadence.Domain
+		case "go_routines":
+			// go_routines uses in-process goroutines — no host/port needed.
 		case "standalone":
 			// standalone mode means no workflow engine — nothing to migrate or validate.
 		default:
@@ -95,7 +97,7 @@ func (s *configService) UpdateVendorConfig(ctx context.Context, vendorType strin
 			hostPort = normalizeHostPort(wfCfg.Temporal.HostPort)
 			namespace = wfCfg.Temporal.Namespace
 		}
-		if provider != "standalone" && (hostPort == "" || namespace == "") {
+		if provider != "standalone" && provider != "go_routines" && (hostPort == "" || namespace == "") {
 			return fmt.Errorf("workflow orchestration config requires host_port and namespace/domain for provider %s", provider)
 		}
 	}
@@ -346,6 +348,8 @@ func extractEndpoint(cfg workflowOrchestrationConfig) (hostPort, namespace strin
 	switch cfg.Provider {
 	case "cadence":
 		return normalizeHostPort(cfg.Cadence.HostPort), cfg.Cadence.Domain
+	case "go_routines":
+		return "go_routines", "inline"
 	case "standalone":
 		return "", ""
 	default:

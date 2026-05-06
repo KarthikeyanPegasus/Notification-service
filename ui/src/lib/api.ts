@@ -10,6 +10,8 @@ import type {
   Template,
   VendorConfig,
   VendorRateLimit,
+  VendorRetryConfig,
+  UpsertVendorRetryConfigRequest,
   IngressBreakdown,
   VendorMetric,
   VendorBilling,
@@ -367,6 +369,34 @@ export async function upsertVendorRateLimitScoped(
 export async function deleteVendorRateLimitScoped(vendorName: string, apiKeyId?: string): Promise<{ message: string }> {
   const q = apiKeyId ? `?api_key_id=${encodeURIComponent(apiKeyId)}` : ''
   return fetchJSON<{ message: string }>(`/v1/admin/config/rate-limits/${encodeURIComponent(vendorName)}${q}`, {
+    method: 'DELETE',
+  })
+}
+
+// Vendor Retry Configs
+
+export async function getVendorRetryConfigsScoped(apiKeyId?: string): Promise<VendorRetryConfig[]> {
+  const q = apiKeyId ? `?api_key_id=${encodeURIComponent(apiKeyId)}` : ''
+  return fetchJSON<VendorRetryConfig[]>(`/v1/admin/config/retry-configs${q}`, {
+    headers: { ...adminAuthHeaders() },
+  })
+}
+
+export async function upsertVendorRetryConfigScoped(
+  vendorName: string,
+  payload: UpsertVendorRetryConfigRequest,
+  apiKeyId?: string,
+): Promise<{ message: string }> {
+  const q = apiKeyId ? `?api_key_id=${encodeURIComponent(apiKeyId)}` : ''
+  return fetchJSON<{ message: string }>(`/v1/admin/config/retry-configs/${encodeURIComponent(vendorName)}${q}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteVendorRetryConfigScoped(vendorName: string, apiKeyId?: string): Promise<{ message: string }> {
+  const q = apiKeyId ? `?api_key_id=${encodeURIComponent(apiKeyId)}` : ''
+  return fetchJSON<{ message: string }>(`/v1/admin/config/retry-configs/${encodeURIComponent(vendorName)}${q}`, {
     method: 'DELETE',
   })
 }

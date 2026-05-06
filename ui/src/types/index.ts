@@ -23,6 +23,7 @@ export interface Notification {
   subject?: string
   body: string
   provider?: string
+  orchestration?: string
   idempotency_key?: string
   scheduled_at?: string
   sent_at?: string
@@ -433,4 +434,26 @@ export interface StartVendorMigrationRequest {
   to_vendor: string
   to_config: any
   strategy?: MigrationStrategy
+}
+
+export interface VendorRetryConfig {
+  id: string
+  vendor_name: string
+  api_key_id?: string | null
+  retry_initial_interval_ms: number
+  retry_max_interval_ms: number
+  retry_max_attempts: number
+  retry_backoff_coefficient: number
+  sla_seconds: number
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface UpsertVendorRetryConfigRequest {
+  retry_initial_interval_ms?: number | null
+  retry_max_interval_ms?: number | null
+  retry_max_attempts?: number | null
+  retry_backoff_coefficient?: number | null
+  sla_seconds?: number | null
 }

@@ -75,7 +75,9 @@ NS_PUBSUB_EXPORTS = \
 	export NS_PUBSUB_KAFKA_BROKERS="$(NS_PUBSUB_KAFKA_BROKERS)"
 
 # ── Migration helper ──────────────────────────────────────────────────────────
-MIGRATE = go run -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+# Use locally installed migrate binary to avoid Go proxy timeouts.
+# Install with: cd api && go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+MIGRATE = $(HOME)/go/bin/migrate
 
 # ── Infrastructure tiers ──────────────────────────────────────────────────────
 
